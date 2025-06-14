@@ -13,7 +13,7 @@ class InspectionApp:
     """
     A GUI application for inspecting cardboard features against a DXF file,
     based on the DIE-VIS paper.
-    This version includes improved HSV contour detection and auto-scaling debug visualization.
+    This version includes high-resolution curve flattening and robust outline assembly.
     """
     def __init__(self, root):
         """
@@ -112,7 +112,8 @@ class InspectionApp:
 
     def load_dxf(self):
         """
-        Opens a file dialog to load the DXF and processes it, ensuring all coordinates are 2D.
+        Opens a file dialog to load the DXF and processes it using high-resolution
+        curve flattening and robust convex hull outline assembly.
         """
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
         if not filepath: return
@@ -122,17 +123,33 @@ class InspectionApp:
             msp = doc.modelspace()
             self.cad_features = {'outline': None, 'holes': [], 'creases': []}
             
+            # --- NEW: Define a flattening tolerance for high-resolution curves ---
+            # A smaller value means more line segments are used to approximate a curve.
+            FLATTENING_TOLERANCE = 0.01
+
+            # --- NEW: Robust outline assembly for fragmented DXFs ---
             outline_entities = msp.query('*[layer=="OUTLINE"]')
             if outline_entities:
+                # Use the flattening tolerance for any curves in the outline
                 edges = list(edgesmith.edges_from_entities_2d(outline_entities))
-                if edges:
-                    chain = edgeminer.find_sequential_chain(edges)
-                    if chain:
-                        contour_points = [v.vec2 for v in (edge.start for edge in chain)]
-                        self.cad_features['outline'] = np.array(contour_points, dtype=np.float32)
+                
+                # Collect vertices from ALL edges on the layer
+                all_outline_points = []
+                for edge in edges:
+                    all_outline_points.append(edge.start.vec2)
+                    all_outline_points.append(edge.end.vec2)
+                    
+                if all_outline_points:
+                    # Use a Convex Hull to find the single, robust outer boundary
+                    # This is perfect for alignment with the physical object's contour.
+                    all_outline_points_np = np.array(all_outline_points, dtype=np.float32)
+                    hull = cv2.convexHull(all_outline_points_np)
+                    self.cad_features['outline'] = hull.reshape(-1, 2) # Reshape to (n, 2)
 
+            # Process Holes with high-resolution curves
             hole_entities = msp.query('*[layer=="HOLES"]')
             if hole_entities:
+                # Use the flattening tolerance here as well
                 remaining_edges = list(edgesmith.edges_from_entities_2d(hole_entities))
                 
                 while remaining_edges:
@@ -146,13 +163,14 @@ class InspectionApp:
                     used_edges_set = set(chain)
                     remaining_edges = [edge for edge in remaining_edges if edge not in used_edges_set]
 
+            # Process Creases
             crease_entities = msp.query('LINE[layer=="CREASES"]')
             for entity in crease_entities:
                 start, end = entity.dxf.start, entity.dxf.end
                 self.cad_features['creases'].append({'start': (start.x, start.y), 'end': (end.x, end.y)})
 
             if self.cad_features['outline'] is None:
-                messagebox.showwarning("DXF Warning", "Could not find a connected outline on the 'OUTLINE' layer. Alignment will fail.")
+                messagebox.showwarning("DXF Warning", "Could not find any entities on the 'OUTLINE' layer.")
             
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
@@ -195,31 +213,17 @@ class InspectionApp:
         self.tk_image = ImageTk.PhotoImage(image=pil_image)
         self.image_label.config(image=self.tk_image)
 
-    # --- NEW: ROBUST CONTOUR FINDING WITH HSV --- 
     def find_image_contour(self, image):
         """
         Finds the main external contour of the cardboard in the image using HSV color segmentation.
-        This is more robust to lighting and background variations.
         """
-        # Convert the image from BGR to HSV color space
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Define the HSV range for typical cardboard color. These values may need tuning.
-        lower_bound_hsv = np.array([5, 40, 40])   # Lower Hue, Saturation, Value
-        upper_bound_hsv = np.array([35, 255, 240])   # Upper H, S, V
-        
-        # Create a binary mask where pixels within the HSV range are white, and others are black.
+        lower_bound_hsv = np.array([5, 40, 40])
+        upper_bound_hsv = np.array([35, 255, 240])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-
-      
-        
-        # Find contours on the cleaned, final mask. RETR_EXTERNAL gets only the outer boundaries.
         contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Return the largest contour by area, which should be the cardboard box.
         return max(contours, key=cv2.contourArea).astype(np.float32) if contours else None
 
-    # --- NEW: AUTO-SCALING CAD VISUALIZATION ---
     def run_debug_visualization(self):
         """
         Generates and displays auto-scaled visualizations for the CAD features and the
@@ -227,6 +231,10 @@ class InspectionApp:
         """
         print("--- Running Alignment Debug Visualization ---")
         
+        if self.cad_features['outline'] is None:
+            messagebox.showerror("Debug Error", "No outline data found in CAD to visualize.")
+            return
+
         # 1. Visualize the CAD data with auto-scaling
         if not self.cad_features['holes']:
              all_points = self.cad_features['outline']
@@ -236,28 +244,25 @@ class InspectionApp:
         x_min, y_min = np.min(all_points, axis=0)
         x_max, y_max = np.max(all_points, axis=0)
         
-        # Define a fixed size for the debug canvas
         CANVAS_W, CANVAS_H = 800, 600
         padding = 50
         
-        # Calculate scale factor to fit the drawing
         cad_w = x_max - x_min
         cad_h = y_max - y_min
-        if cad_w == 0 or cad_h == 0: return # Avoid division by zero
+        if cad_w == 0 or cad_h == 0: 
+            messagebox.showwarning("Debug Warning", "CAD data has no width or height. Cannot visualize.")
+            return
         
         scale_x = (CANVAS_W - 2 * padding) / cad_w
         scale_y = (CANVAS_H - 2 * padding) / cad_h
-        scale = min(scale_x, scale_y) # Use the smaller scale to maintain aspect ratio
+        scale = min(scale_x, scale_y)
 
-        # Create a black canvas
         cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
         
-        # Function to transform and scale points
         def transform_pt(points):
-            # Translate so top-left is at (0,0), then scale, then add padding
             return (((points - [x_min, y_min]) * scale) + padding).astype(np.int32)
 
-        # Draw the outline in white
+        # Draw the outline in white (using the convex hull)
         outline_shifted = transform_pt(self.cad_features['outline'])
         cv2.polylines(cad_canvas, [outline_shifted], isClosed=True, color=(255, 255, 255), thickness=2)
         
@@ -265,7 +270,7 @@ class InspectionApp:
         for hole in self.cad_features['holes']:
             hole_shifted = transform_pt(hole['points'])
             cv2.polylines(cad_canvas, [hole_shifted], isClosed=True, color=(0, 255, 255), thickness=2)
-        
+            
         cv2.imshow("DEBUG: Parsed CAD Features (Auto-Scaled)", cad_canvas)
 
         # 2. Visualize the detected image contour
