@@ -1,0 +1,381 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import cv2
+import ezdxf
+from ezdxf import edgeminer, edgesmith # Correct, necessary imports
+from ezdxf.math import Vec2 # Import Vec2 for type checking
+import numpy as np
+import os
+import traceback
+
+class InspectionApp:
+    """
+    A GUI application for inspecting cardboard features against a DXF file,
+    based on the DIE-VIS paper.
+    This corrected version uses the precise edgeminer.find_sequential_chain
+    workflow and correct vertex extraction from edge chains.
+    """
+    def __init__(self, root):
+        """
+        Initializes the main application window and its widgets.
+        
+        Args:
+            root: The root Tkinter window.
+        """
+        self.root = root
+        self.root.title("DIE-VIS: Cardboard Inspection System - Corrected")
+        self.root.geometry("1200x850")
+
+        # --- State Variables ---
+        self.image_path = None
+        self.dxf_path = None
+        self.cv_image = None
+        self.result_image = None
+        self.cad_features = {'outline': None, 'holes': [], 'creases': []}
+        self.transformed_features = {'outline': None, 'holes': [], 'creases': []}
+        self.homography_matrix = None
+        
+        # --- UI Colors and Styles ---
+        self.colors = {
+            "bg": "#2E2E2E",
+            "fg": "#FFFFFF",
+            "btn": "#4A4A4A",
+            "btn_active": "#5A5A5A",
+            "accent": "#007ACC",
+            "success": "#28A745", # Green for 'Found'
+            "fail": "#DC3545",    # Red for 'Missing'
+            "info": "#17A2B8"     # Cyan for 'Expected Crease'
+        }
+        self.root.configure(bg=self.colors["bg"])
+        self.setup_styles()
+
+        # --- UI Layout ---
+        main_frame = tk.Frame(root, bg=self.colors["bg"])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        control_frame = tk.Frame(main_frame, bg=self.colors["bg"])
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
+        self.image_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Control Widgets ---
+        self.btn_load_image = ttk.Button(control_frame, text="1. Load Cardboard Image", command=self.load_image)
+        self.btn_load_image.pack(side=tk.LEFT, padx=5)
+
+        self.btn_load_dxf = ttk.Button(control_frame, text="2. Load DXF File", command=self.load_dxf)
+        self.btn_load_dxf.pack(side=tk.LEFT, padx=5)
+
+        self.btn_run_inspection = ttk.Button(control_frame, text="3. Align & Inspect", state=tk.DISABLED, command=self.run_inspection)
+        self.btn_run_inspection.pack(side=tk.LEFT, padx=20)
+        
+        self.lbl_image_status = tk.Label(control_frame, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
+        self.lbl_image_status.pack(side=tk.LEFT)
+        
+        self.lbl_dxf_status = tk.Label(control_frame, text="DXF: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
+        self.lbl_dxf_status.pack(side=tk.LEFT)
+
+        # --- Image Display ---
+        self.image_label = tk.Label(self.image_frame, bg="#000000")
+        self.image_label.pack(fill=tk.BOTH, expand=True)
+        self.image_label.bind("<Configure>", self.on_resize)
+
+    def setup_styles(self):
+        """Configures the visual style for ttk widgets."""
+        style = ttk.Style()
+        style.configure("TButton", padding=6, relief="flat",
+                        background=self.colors["btn"], foreground=self.colors["fg"],
+                        font=('Helvetica', 10, 'bold'))
+        style.map("TButton",
+                  background=[('active', self.colors["btn_active"]),
+                              ('disabled', '#3D3D3D')])
+
+    def load_image(self):
+        """Opens a file dialog to load the cardboard image."""
+        filepath = filedialog.askopenfilename(title="Select a Cardboard Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
+        if not filepath: return
+        self.image_path = filepath
+        try:
+            self.cv_image = cv2.imread(self.image_path)
+            if self.cv_image is None: raise ValueError("OpenCV could not read the image file.")
+            self.result_image = self.cv_image.copy()
+            self.lbl_image_status.config(text=f"Image: {os.path.basename(self.image_path)}")
+            self.update_image_display(self.cv_image)
+            self._check_files_loaded()
+        except Exception as e:
+            messagebox.showerror("Image Load Error", f"Failed to load image: {e}")
+            self.reset_image_state()
+
+    def load_dxf(self):
+        """
+        Opens a file dialog to load the DXF and processes it using the
+        specified find_sequential_chain workflow and correct vertex extraction.
+        """
+        filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
+        if not filepath: return
+        self.dxf_path = filepath
+        try:
+            doc = ezdxf.readfile(self.dxf_path)
+            msp = doc.modelspace()
+            self.cad_features = {'outline': None, 'holes': [], 'creases': []}
+            
+            # --- FULLY CORRECTED DXF PARSING LOGIC ---
+
+            # Process Outline (a single feature)
+            outline_entities = msp.query('*[layer=="OUTLINE"]')
+            if outline_entities:
+                edges = list(edgesmith.edges_from_entities_2d(outline_entities))
+                if edges:
+                    chain = edgeminer.find_sequential_chain(edges)
+                    if chain:
+                        # CORRECT WAY TO GET VERTICES FROM A CHAIN OF EDGES
+                        # A chain is an ordered list of Edge objects. We extract the start vertex of each edge.
+                        contour_points = [edge.start for edge in chain]
+                        self.cad_features['outline'] = np.array(contour_points, dtype=np.float32)
+
+            # Process Holes (multiple features on one layer)
+            hole_entities = msp.query('*[layer=="HOLES"]')
+            if hole_entities:
+                remaining_edges = list(edgesmith.edges_from_entities_2d(hole_entities))
+                
+                while remaining_edges:
+                    chain = edgeminer.find_sequential_chain(remaining_edges)
+                    if not chain:
+                        break 
+                    
+                    if chain[0].start.isclose(chain[-1].end): # Check if the chain is a closed loop
+                        # CORRECT VERTEX EXTRACTION
+                        contour_points = [edge.start for edge in chain]
+                        self.cad_features['holes'].append({'points': np.array(contour_points, dtype=np.float32)})
+                    
+                    used_edges_set = set(chain)
+                    remaining_edges = [edge for edge in remaining_edges if edge not in used_edges_set]
+
+            # Process Creases
+            crease_entities = msp.query('LINE[layer=="CREASES"]')
+            for entity in crease_entities:
+                start, end = entity.dxf.start, entity.dxf.end
+                self.cad_features['creases'].append({'start': (start.x, start.y), 'end': (end.x, end.y)})
+
+            # --- END OF CORRECTED LOGIC ---
+
+            if self.cad_features['outline'] is None:
+                messagebox.showwarning("DXF Warning", "Could not find a connected outline on the 'OUTLINE' layer. Alignment will fail.")
+            
+            self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
+            self._check_files_loaded()
+            print("--- DXF Parse Complete ---")
+            print(f"Features Loaded:\n- Outline Found: {self.cad_features['outline'] is not None}\n- Holes: {len(self.cad_features['holes'])}\n- Creases: {len(self.cad_features['creases'])}")
+
+        except Exception as e:
+            error_details = traceback.format_exc()
+            print("---!!! DXF PARSING FAILED !!!---")
+            print(error_details)
+            messagebox.showerror(
+                "DXF Load Error",
+                f"An unexpected error occurred while processing the DXF.\n\nDetails:\n{e}\n\nPlease check the console for a full traceback."
+            )
+            self.reset_dxf_state()
+
+    def _check_files_loaded(self):
+        """Enables the inspection button only if both an image and a valid DXF are loaded."""
+        if self.image_path and self.dxf_path and self.cad_features['outline'] is not None:
+            self.btn_run_inspection.config(state=tk.NORMAL)
+        else:
+            self.btn_run_inspection.config(state=tk.DISABLED)
+
+    def on_resize(self, event=None):
+        """Handles window resizing to keep the image display scaled properly."""
+        if self.result_image is not None: self.update_image_display(self.result_image)
+
+    def update_image_display(self, image_to_show):
+        """Resizes and displays the given OpenCV image in the Tkinter label."""
+        if image_to_show is None: return
+        frame_w, frame_h = self.image_frame.winfo_width(), self.image_frame.winfo_height()
+        if frame_w <= 1 or frame_h <= 1: return
+        
+        img_h, img_w = image_to_show.shape[:2]
+        scale = min(frame_w / img_w, frame_h / img_h)
+        new_w, new_h = int(img_w * scale), int(img_h * scale)
+        
+        display_image = cv2.resize(image_to_show, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        rgb_image = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb_image)
+        self.tk_image = ImageTk.PhotoImage(image=pil_image)
+        self.image_label.config(image=self.tk_image)
+
+    def find_image_contour(self, image):
+        """Finds the main external contour of the cardboard in the image."""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 3)
+        kernel = np.ones((5,5), np.uint8)
+        thresh_closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        
+        contours, _ = cv2.findContours(thresh_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return max(contours, key=cv2.contourArea).astype(np.float32) if contours else None
+
+    def run_inspection(self):
+        """Main function to run the full alignment and inspection pipeline."""
+        print("--- Starting Inspection ---")
+        self.result_image = self.cv_image.copy()
+
+        image_contour = self.find_image_contour(self.cv_image)
+        if image_contour is None:
+            messagebox.showerror("Inspection Error", "Could not find the cardboard's outline in the image.")
+            return
+
+        self.homography_matrix, _ = cv2.findHomography(self.cad_features['outline'], image_contour, cv2.RANSAC, 5.0)
+        if self.homography_matrix is None:
+            messagebox.showerror("Alignment Error", "Could not calculate the transformation (homography). Ensure the CAD 'cuts' layer forms a single, continuous shape that matches the image.")
+            return
+        
+        self.transform_cad_features()
+        print("Alignment successful.")
+
+        self.detect_holes()
+        self.detect_creases()
+
+        self.update_image_display(self.result_image)
+        messagebox.showinfo("Inspection Complete", "Inspection finished. Results are shown in the image.")
+
+    def transform_cad_features(self):
+        """Applies the calculated homography to all CAD features to map them into image space."""
+        if self.homography_matrix is None: return
+        self.transformed_features = {'outline': None, 'holes': [], 'creases': []}
+        
+        outline_pts = self.cad_features['outline'].reshape(-1, 1, 2)
+        self.transformed_features['outline'] = cv2.perspectiveTransform(outline_pts, self.homography_matrix).reshape(-1, 2)
+        
+        for hole in self.cad_features['holes']:
+            hole_pts = hole['points'].reshape(-1, 1, 2)
+            transformed_points = cv2.perspectiveTransform(hole_pts, self.homography_matrix)
+            self.transformed_features['holes'].append({'points': transformed_points.reshape(-1, 2)})
+
+        for crease in self.cad_features['creases']:
+            crease_pts = np.array([crease['start'], crease['end']], dtype=np.float32).reshape(-1, 1, 2)
+            transformed_points = cv2.perspectiveTransform(crease_pts, self.homography_matrix).reshape(-1, 2)
+            self.transformed_features['creases'].append({'start': transformed_points[0], 'end': transformed_points[1]})
+
+    def detect_holes(self):
+        """Detects missing holes by comparing expected CAD holes to found image contours."""
+        print("--- Detecting Holes ---")
+        if not self.transformed_features['holes']: return
+        
+        mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask, [self.transformed_features['outline'].astype(np.int32)], 255)
+
+        gray = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY_INV)
+        thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
+
+        detected_contours, _ = cv2.findContours(thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        found_holes_flags = [False] * len(self.transformed_features['holes'])
+
+        for contour in detected_contours:
+            M = cv2.moments(contour)
+            if M["m00"] == 0: continue
+            center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+            
+            for i, expected_hole in enumerate(self.transformed_features['holes']):
+                if found_holes_flags[i]: continue
+                if cv2.pointPolygonTest(expected_hole['points'].astype(np.int32), center, False) >= 0:
+                    found_holes_flags[i] = True
+                    break
+
+        for i, was_found in enumerate(found_holes_flags):
+            hole_poly = self.transformed_features['holes'][i]['points'].astype(np.int32)
+            if was_found:
+                cv2.polylines(self.result_image, [hole_poly], True, self.hex_to_bgr(self.colors["success"]), 3)
+            else:
+                center = tuple(np.mean(hole_poly, axis=0).astype(int))
+                cv2.line(self.result_image, (center[0]-15, center[1]-15), (center[0]+15, center[1]+15), self.hex_to_bgr(self.colors["fail"]), 3)
+                cv2.line(self.result_image, (center[0]-15, center[1]+15), (center[0]+15, center[1]-15), self.hex_to_bgr(self.colors["fail"]), 3)
+
+    def detect_creases(self):
+        """Detects missing creases using the custom pixel transition algorithm from the DIE-VIS paper."""
+        print("--- Detecting Creases ---")
+        if not self.transformed_features['creases']: return
+
+        gray = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2GRAY)
+        crease_evidence_map = self.find_pixel_transitions(gray, low_thresh=15, high_thresh=50)
+
+        for crease in self.transformed_features['creases']:
+            p1 = crease['start'].astype(int)
+            p2 = crease['end'].astype(int)
+            
+            mask = np.zeros_like(gray)
+            cv2.line(mask, tuple(p1), tuple(p2), 255, 10) 
+            
+            intersection = cv2.bitwise_and(crease_evidence_map, crease_evidence_map, mask=mask)
+            
+            evidence_pixels = np.count_nonzero(intersection)
+            crease_length = np.linalg.norm(p1 - p2)
+            density = evidence_pixels / crease_length if crease_length > 0 else 0
+            
+            if density > 0.4:
+                 overlay = self.result_image.copy()
+                 cv2.line(overlay, tuple(p1), tuple(p2), self.hex_to_bgr(self.colors["success"]), 4)
+                 self.result_image = cv2.addWeighted(overlay, 0.6, self.result_image, 0.4, 0)
+            else:
+                cv2.line(self.result_image, tuple(p1), tuple(p2), self.hex_to_bgr(self.colors["fail"]), 3)
+
+    def find_pixel_transitions(self, image, low_thresh, high_thresh):
+        """
+        Implementation of Algorithm 1 from the DIE-VIS paper. It scans rows and
+        columns to find the characteristic shadow-highlight pattern of a crease.
+        """
+        h, w = image.shape
+        crease_map = np.zeros((h, w), dtype=np.uint8)
+        img_float = image.astype(float)
+
+        for r in range(h):
+            start_transition, is_down, is_up = False, False, False
+            prev_val, prev_coord = 0, 0
+            for c in range(1, w):
+                p1, p2 = img_float[r, c-1], img_float[r, c]
+                if p1 > p2: 
+                    if not start_transition:
+                        start_transition, is_down, is_up = True, True, False
+                        prev_val, prev_coord = p1, c
+                    elif is_up:
+                        delta = abs(prev_val - p1)
+                        if low_thresh <= delta <= high_thresh:
+                            crease_map[r, (c + prev_coord) // 2] = 255
+                        is_down, is_up, prev_val, prev_coord = True, False, p1, c
+                elif p1 < p2:
+                    if not start_transition:
+                        start_transition, is_up, is_down = True, True, False
+                        prev_val, prev_coord = p1, c
+                    elif is_down:
+                        delta = abs(prev_val - p1)
+                        if low_thresh <= delta <= high_thresh:
+                            crease_map[r, (c + prev_coord) // 2] = 255
+                        is_up, is_down, prev_val, prev_coord = True, False, p1, c
+        return crease_map
+
+
+    def hex_to_bgr(self, hex_color):
+        """Converts a hex color string like '#FFFFFF' to a BGR tuple."""
+        h = hex_color.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (4, 2, 0))
+
+    def reset_image_state(self):
+        """Resets all variables related to the loaded image."""
+        self.image_path, self.cv_image, self.result_image = None, None, None
+        self.lbl_image_status.config(text="Image: None")
+        self.update_image_display(None)
+        self._check_files_loaded()
+
+    def reset_dxf_state(self):
+        """Resets all variables related to the loaded DXF file."""
+        self.dxf_path = None
+        self.cad_features = {'outline': None, 'holes': [], 'creases': []}
+        self.lbl_dxf_status.config(text="DXF: None")
+        self._check_files_loaded()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = InspectionApp(root)
+    root.mainloop()
