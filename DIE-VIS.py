@@ -195,7 +195,7 @@ class InspectionApp:
         self.tk_image = ImageTk.PhotoImage(image=pil_image)
         self.image_label.config(image=self.tk_image)
 
-    # --- NEW: ROBUST CONTOUR FINDING WITH HSV ---
+    # --- NEW: ROBUST CONTOUR FINDING WITH HSV --- 
     def find_image_contour(self, image):
         """
         Finds the main external contour of the cardboard in the image using HSV color segmentation.
