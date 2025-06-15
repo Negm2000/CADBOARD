@@ -5,6 +5,7 @@ import cv2
 import ezdxf
 # These are the correct and necessary imports for geometric reconstruction
 from ezdxf import edgeminer, edgesmith
+import math
 from ezdxf.math import Vec2
 import numpy as np
 import os
@@ -104,96 +105,98 @@ class InspectionApp:
 
     def load_dxf(self):
         """
-        Loads and processes a DXF file using a robust 'Longest Path' heuristic.
-        This approach correctly identifies the main outline even if it has small
-        gaps (is an open contour), which is a common issue in real-world CAD files.
+        Loads and processes a DXF file by extracting all entities from each layer
+        and converting them to point sequences. This approach correctly handles
+        complex entities like arcs, splines, and polylines.
         """
-        filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
-        if not filepath: return
+        filepath = filedialog.askopenfilename(
+            title="Select a DXF File", 
+            filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")]
+        )
+        if not filepath: 
+            return
+        
         self.dxf_path = filepath
         
         try:
-            print("--- Starting DXF Parsing (Longest Path Heuristic) ---")
+            print("--- Starting DXF Parsing (Direct Entity Processing) ---")
             doc = ezdxf.readfile(self.dxf_path)
             msp = doc.modelspace()
-            # **FIX:** Manually reset only the data-holding variables, NOT the entire state.
-            # Do not call self.reset_dxf_state() here as it nullifies self.dxf_path.
+            
+            # Reset data-holding variables
             self.candidate_chains = []
             self.cad_features = {'outline': None, 'holes': [], 'creases': []}
 
-
-            # --- STAGE 1: EDGE SOUP GENERATION ---
-            print("1. Generating edge soup from 'OUTLINE' layer...")
+            # --- PROCESS OUTLINE LAYER ---
+            print("1. Processing OUTLINE layer...")
             outline_entities = msp.query('*[layer=="OUTLINE"]')
             if not outline_entities:
                 raise ValueError("No entities found on the 'OUTLINE' layer.")
             
-            # Note: edgesmith automatically handles complex entities like SPLINEs and ARCs
-            # by approximating them with many small linear edges.
-            all_edges = list(edgesmith.edges_from_entities_2d(outline_entities))
-            if not all_edges:
-                raise ValueError("Could not create any geometric edges from entities on the 'OUTLINE' layer.")
-
-            # --- STAGE 2: FIND ALL CONTIGUOUS PATHS (CHAINS) ---
-            print("2. Discovering all contiguous paths (chains)...")
-            deposit = edgeminer.Deposit(all_edges)
-            # Use find_all_simple_chains, which is designed to find open contours.
-            self.candidate_chains = edgeminer.find_all_simple_chains(deposit)
+            outline_points = []
             
-            if not self.candidate_chains:
-                raise ValueError("Could not find any contiguous paths (chains) on the 'OUTLINE' layer.")
+            for entity in outline_entities:
+                entity_points = self._extract_entity_points(entity)
+                if entity_points:
+                    outline_points.extend(entity_points)
             
-            print(f"   Found {len(self.candidate_chains)} candidate path(s).")
-
-            # --- STAGE 3: SELECTION VIA LONGEST PATH HEURISTIC ---
-            print("3. Selecting best candidate via Longest Path heuristic...")
-            longest_chain_len = -1.0
-            best_chain = None
-
-            for i, chain in enumerate(self.candidate_chains):
-                # Calculate the total length of the current chain.
-                # The length of an edge is the distance between its start and end vertices.
-                chain_len = sum(edge.start.distance(edge.end) for edge in chain)
-                print(f"   - Candidate {i}: vertices={len(chain)+1}, length={chain_len:.4f}")
-
-                if chain_len > longest_chain_len:
-                    longest_chain_len = chain_len
-                    best_chain = chain
+            if not outline_points:
+                raise ValueError("Could not extract any points from OUTLINE layer entities.")
             
-            # --- STAGE 4: VALIDATION AND FINALIZATION ---
-            print("4. Validating and finalizing selected path...")
-            if best_chain:
-                # Extract ordered vertices from the longest chain.
-                # The path is composed of the start of the first edge, followed by the end of every edge.
-                points = [best_chain[0].start] + [edge.end for edge in best_chain]
-                
-                # Perform final validation
-                if len(points) < 2:
-                    raise ValueError("Selected path has fewer than 2 vertices.")
-                
-                print(f"   Validation PASSED. Final outline has {len(points)} vertices.")
-                outline_points_np = np.array([(p.x, p.y) for p in points], dtype=np.float32)
-                self.cad_features['outline'] = outline_points_np
-            else:
-                 raise ValueError("Failed to identify a valid outline path from the candidates.")
+            # Remove duplicate consecutive points
+            outline_points = self._remove_consecutive_duplicates(outline_points)
             
-            # --- Process Holes and Creases (This logic remains the same) ---
-            print("5. Processing HOLES (as closed loops) and CREASES...")
+            if len(outline_points) < 3:
+                raise ValueError(f"OUTLINE layer produced only {len(outline_points)} unique points (minimum 3 required).")
+            
+            self.cad_features['outline'] = np.array(outline_points, dtype=np.float32)
+            print(f"   Extracted {len(outline_points)} points from OUTLINE layer")
+
+            # --- PROCESS HOLES LAYER ---
+            print("2. Processing HOLES layer...")
             hole_entities = msp.query('*[layer=="HOLES"]')
             if hole_entities:
-                hole_edges = list(edgesmith.edges_from_entities_2d(hole_entities))
-                hole_deposit = edgeminer.Deposit(hole_edges)
-                hole_loops = edgeminer.find_all_loops(hole_deposit) # Holes must be closed loops
-                for loop in hole_loops:
-                    contour_points = [edge.start.vec2 for edge in loop]
-                    self.cad_features['holes'].append({'points': np.array(contour_points, dtype=np.float32)})
-            
-            crease_entities = msp.query('LINE[layer=="CREASES"]')
-            for entity in crease_entities:
-                start, end = entity.dxf.start, entity.dxf.end
-                self.cad_features['creases'].append({'start': (start.x, start.y), 'end': (end.x, end.y)})
+                # Group hole entities by proximity or connectivity
+                hole_groups = self._group_hole_entities(hole_entities)
+                
+                for group in hole_groups:
+                    hole_points = []
+                    for entity in group:
+                        entity_points = self._extract_entity_points(entity)
+                        if entity_points:
+                            hole_points.extend(entity_points)
+                    
+                    if hole_points:
+                        hole_points = self._remove_consecutive_duplicates(hole_points)
+                        if len(hole_points) >= 3:
+                            self.cad_features['holes'].append({
+                                'points': np.array(hole_points, dtype=np.float32)
+                            })
+                
+                print(f"   Found {len(self.cad_features['holes'])} hole(s)")
 
-            # Now that self.dxf_path is guaranteed to be valid, update the label.
+            # --- PROCESS CREASES LAYER ---
+            print("3. Processing CREASES layer...")
+            crease_entities = msp.query('*[layer=="CREASES"]')
+            for entity in crease_entities:
+                if entity.dxftype() == 'LINE':
+                    start, end = entity.dxf.start, entity.dxf.end
+                    self.cad_features['creases'].append({
+                        'start': (start.x, start.y), 
+                        'end': (end.x, end.y)
+                    })
+                else:
+                    # Handle other crease entity types if needed
+                    entity_points = self._extract_entity_points(entity)
+                    if len(entity_points) >= 2:
+                        self.cad_features['creases'].append({
+                            'start': entity_points[0], 
+                            'end': entity_points[-1]
+                        })
+            
+            print(f"   Found {len(self.cad_features['creases'])} crease(s)")
+
+            # Update UI
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
             print("--- DXF Parse Complete ---")
@@ -202,6 +205,134 @@ class InspectionApp:
             error_details = traceback.format_exc()
             messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{e}\n\nDetails:\n{error_details}")
             self.reset_dxf_state()
+
+    def _extract_entity_points(self, entity):
+        """
+        Extract points from a DXF entity, handling different entity types.
+        Returns a list of (x, y) tuples.
+        """
+        points = []
+        
+        try:
+            if entity.dxftype() == 'LINE':
+                start, end = entity.dxf.start, entity.dxf.end
+                points = [(start.x, start.y), (end.x, end.y)]
+                
+            elif entity.dxftype() == 'POLYLINE':
+                points = [(vertex.dxf.location.x, vertex.dxf.location.y) for vertex in entity.vertices]
+                
+            elif entity.dxftype() == 'LWPOLYLINE':
+                points = [(point[0], point[1]) for point in entity.get_points('xy')]
+                
+            elif entity.dxftype() == 'ARC':
+                # Convert arc to polyline approximation
+                start_angle = math.radians(entity.dxf.start_angle)
+                end_angle = math.radians(entity.dxf.end_angle)
+                center = entity.dxf.center
+                radius = entity.dxf.radius
+                
+                # Handle angle wrap-around
+                if end_angle < start_angle:
+                    end_angle += 2 * math.pi
+                
+                # Create arc approximation with sufficient resolution
+                num_segments = max(8, int(abs(end_angle - start_angle) * radius / 2))
+                angle_step = (end_angle - start_angle) / num_segments
+                
+                for i in range(num_segments + 1):
+                    angle = start_angle + i * angle_step
+                    x = center.x + radius * math.cos(angle)
+                    y = center.y + radius * math.sin(angle)
+                    points.append((x, y))
+                    
+            elif entity.dxftype() == 'CIRCLE':
+                # Convert circle to polyline approximation
+                center = entity.dxf.center
+                radius = entity.dxf.radius
+                num_segments = max(16, int(2 * math.pi * radius / 4))  # Adaptive resolution
+                
+                for i in range(num_segments):
+                    angle = 2 * math.pi * i / num_segments
+                    x = center.x + radius * math.cos(angle)
+                    y = center.y + radius * math.sin(angle)
+                    points.append((x, y))
+                # Close the circle
+                if points:
+                    points.append(points[0])
+                    
+            elif entity.dxftype() == 'SPLINE':
+                # Use ezdxf's built-in spline flattening
+                try:
+                    flattened = list(entity.flattening(0.1))  # 0.1 is the distance tolerance
+                    points = [(point.x, point.y) for point in flattened]
+                except:
+                    # Fallback: use control points
+                    points = [(point.x, point.y) for point in entity.control_points]
+                    
+            elif entity.dxftype() == 'ELLIPSE':
+                # Convert ellipse to polyline approximation
+                center = entity.dxf.center
+                major_axis = entity.dxf.major_axis
+                ratio = entity.dxf.ratio
+                start_param = entity.dxf.start_param
+                end_param = entity.dxf.end_param
+                
+                # Create ellipse approximation
+                if end_param < start_param:
+                    end_param += 2 * math.pi
+                
+                param_range = end_param - start_param
+                num_segments = max(16, int(param_range * 8))
+                param_step = param_range / num_segments
+                
+                major_length = major_axis.magnitude
+                minor_length = major_length * ratio
+                
+                # Get major axis angle
+                major_angle = math.atan2(major_axis.y, major_axis.x)
+                
+                for i in range(num_segments + 1):
+                    param = start_param + i * param_step
+                    # Parametric ellipse point
+                    local_x = major_length * math.cos(param)
+                    local_y = minor_length * math.sin(param)
+                    
+                    # Rotate by major axis angle and translate to center
+                    x = center.x + local_x * math.cos(major_angle) - local_y * math.sin(major_angle)
+                    y = center.y + local_x * math.sin(major_angle) + local_y * math.cos(major_angle)
+                    points.append((x, y))
+                    
+            else:
+                print(f"   Warning: Unhandled entity type '{entity.dxftype()}' - skipping")
+                
+        except Exception as e:
+            print(f"   Warning: Error processing {entity.dxftype()} entity: {e}")
+        
+        return points
+
+    def _remove_consecutive_duplicates(self, points, tolerance=1e-6):
+        """Remove consecutive duplicate points within tolerance."""
+        if not points:
+            return points
+        
+        filtered = [points[0]]
+        for point in points[1:]:
+            last_point = filtered[-1]
+            distance = math.sqrt((point[0] - last_point[0])**2 + (point[1] - last_point[1])**2)
+            if distance > tolerance:
+                filtered.append(point)
+        
+        return filtered
+
+    def _group_hole_entities(self, hole_entities):
+        """
+        Group hole entities that belong to the same hole.
+        For now, return each entity as its own group.
+        More sophisticated grouping could be added based on proximity.
+        """
+        # Simple approach: each entity is its own group
+        # This works well when each hole is a single entity (circle, polyline, etc.)
+        return [[entity] for entity in hole_entities]
 
     def _check_files_loaded(self):
         # Use .get() for safer dictionary access
