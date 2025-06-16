@@ -3,10 +3,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import cv2
 import ezdxf
-# These are the correct and necessary imports for geometric reconstruction
-from ezdxf import edgeminer, edgesmith
 import math
-from ezdxf.math import Vec2
 import numpy as np
 import os
 import traceback
@@ -14,9 +11,6 @@ import traceback
 class InspectionApp:
     """
     A GUI application for inspecting cardboard features against a DXF file.
-    This version implements a robust 'Longest Path' heuristic to correctly
-    identify the main outline even if it's an open contour, solving persistent
-    parsing issues.
     """
     def __init__(self, root):
         """
@@ -26,7 +20,7 @@ class InspectionApp:
             root: The root Tkinter window.
         """
         self.root = root
-        self.root.title("DIE-VIS: Cardboard Inspection System (Longest Path Method)")
+        self.root.title("DIE-VIS: Cardboard Inspection System")
         self.root.geometry("1200x850")
 
         # --- State Variables ---
@@ -401,24 +395,16 @@ class InspectionApp:
             transformed += [padding, (CANVAS_H - padding)]
             return transformed.astype(np.int32)
 
-        # Draw all candidate chains in a muted color to show what was considered
-        for chain in self.candidate_chains:
-            points = [chain[0].start] + [edge.end for edge in chain]
-            points_np = np.array([(p.x, p.y) for p in points], dtype=np.float32)
-            shifted_points = transform_pt(points_np)
-            cv2.polylines(cad_canvas, [shifted_points], isClosed=False, color=(50, 50, 50), thickness=1)
-
-        # Draw the final selected outline (longest path) in bright white
         outline_shifted = transform_pt(self.cad_features['outline'])
         # Since it's an open path, use isClosed=False
-        cv2.polylines(cad_canvas, [outline_shifted], isClosed=False, color=(255, 255, 255), thickness=3)
+        cv2.polylines(cad_canvas, [outline_shifted], isClosed=False, color=(255, 255, 255), thickness=1)
         
         # Draw holes in yellow
         for hole in self.cad_features['holes']:
             hole_shifted = transform_pt(hole['points'])
-            cv2.polylines(cad_canvas, [hole_shifted], isClosed=True, color=(0, 255, 255), thickness=1)
+            cv2.polylines(cad_canvas, [hole_shifted], isClosed=False, color=(0, 255, 255), thickness=1)
             
-        cv2.imshow("DEBUG: Parsed CAD (Longest Path Highlighted)", cad_canvas)
+        cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
 
         # --- Visualize Image Contour ---
         image_contour = self.find_image_contour(self.cv_image)
