@@ -19,13 +19,12 @@ class InspectionApp:
         self.image_path = None
         self.dxf_path = None
         self.cv_image = None
-        # This will hold the image currently displayed in the GUI
-        self.display_image = None
+        self.original_cv_image = None # Store original for resets
         self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         
         # --- UI Colors and Styles ---
         self.colors = {
-            "bg": "#2E2E2E", "fg": "#FFFFFF", "btn": "#4A4A4A",
+            "bg": "#2E2E2E", "fg": "#2C2C2C", "btn": "#4A4A4A",
             "btn_active": "#5A5A5A", "accent": "#007ACC"
         }
         self.root.configure(bg=self.colors["bg"])
@@ -51,8 +50,9 @@ class InspectionApp:
         self.btn_visualize = ttk.Button(control_frame, text="Visualize Inputs", state=tk.DISABLED, command=self.run_visualization)
         self.btn_visualize.pack(side=tk.LEFT, padx=(20, 5))
         
-        self.btn_debug_matching = ttk.Button(control_frame, text="Debug Matching", state=tk.DISABLED, command=self.run_feature_matching_debug)
-        self.btn_debug_matching.pack(side=tk.LEFT, padx=5)
+        # MODIFIED: Debug button now targets the new geometric alignment logic
+        self.btn_debug_alignment = ttk.Button(control_frame, text="Debug Alignment", state=tk.DISABLED, command=self.run_alignment_debug)
+        self.btn_debug_alignment.pack(side=tk.LEFT, padx=5)
         
         self.btn_inspect = ttk.Button(control_frame, text="Align & Inspect", state=tk.DISABLED, command=self.run_alignment_and_inspection)
         self.btn_inspect.pack(side=tk.LEFT, padx=5)
@@ -78,11 +78,11 @@ class InspectionApp:
         if not filepath: return
         self.image_path = filepath
         try:
-            self.cv_image = cv2.imread(self.image_path)
-            if self.cv_image is None: raise ValueError("OpenCV could not read the image file.")
-            self.display_image = self.cv_image.copy()
+            self.original_cv_image = cv2.imread(self.image_path)
+            if self.original_cv_image is None: raise ValueError("OpenCV could not read the image file.")
+            self.cv_image = self.original_cv_image.copy()
             self.lbl_image_status.config(text=f"Image: {os.path.basename(self.image_path)}")
-            self.update_image_display()
+            self.update_image_display(self.cv_image)
             self._check_files_loaded()
         except Exception as e:
             messagebox.showerror("Image Load Error", f"Failed to load image: {e}")
@@ -97,28 +97,24 @@ class InspectionApp:
             doc = ezdxf.readfile(self.dxf_path)
             msp = doc.modelspace()
             self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
-            outline_segments = []
-            for entity in msp.query('*[layer=="OUTLINE"]'):
-                points = self._extract_entity_points(entity)
-                for i in range(len(points) - 1): outline_segments.append((points[i], points[i+1]))
-            if outline_segments:
-                assembled_outlines = self._assemble_paths(outline_segments)
-                if assembled_outlines:
-                    self.cad_features['outline'] = np.array(max(assembled_outlines, key=len), dtype=np.float32)
-            all_hole_segments = []
-            for entity in msp.query('*[layer=="HOLES"]'):
-                points = self._extract_entity_points(entity)
-                for i in range(len(points) - 1): all_hole_segments.append((points[i], points[i+1]))
-            if all_hole_segments:
-                assembled_hole_paths = self._assemble_paths(all_hole_segments)
-                for path in assembled_hole_paths: self.cad_features['holes'].append(np.array(path, dtype=np.float32))
-            all_crease_segments = []
-            for entity in msp.query('*[layer=="CREASES"]'):
-                points = self._extract_entity_points(entity)
-                for i in range(len(points) - 1): all_crease_segments.append((points[i], points[i+1]))
-            if all_crease_segments:
-                assembled_crease_paths = self._assemble_paths(all_crease_segments)
-                for path in assembled_crease_paths: self.cad_features['creases'].append(np.array(path, dtype=np.float32))
+            
+            def process_layer(layer_name):
+                segments = []
+                for entity in msp.query(f'*[layer=="{layer_name}"]'):
+                    points = self._extract_entity_points(entity)
+                    if len(points) > 1:
+                        for i in range(len(points) - 1): segments.append((points[i], points[i+1]))
+                
+                assembled_paths = self._assemble_paths(segments)
+                return [np.array(p, dtype=np.float32) for p in assembled_paths]
+
+            outlines = process_layer("OUTLINE")
+            if outlines:
+                self.cad_features['outline'] = max(outlines, key=lambda p: cv2.arcLength(p.reshape(-1, 1, 2), False))
+            
+            self.cad_features['holes'] = process_layer("HOLES")
+            self.cad_features['creases'] = process_layer("CREASES")
+
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
             print("--- DXF Parse Complete ---")
@@ -128,192 +124,133 @@ class InspectionApp:
             self.reset_dxf_state()
 
     def _check_files_loaded(self):
-        if self.image_path and self.dxf_path:
-            self.btn_visualize.config(state=tk.NORMAL)
-            self.btn_inspect.config(state=tk.NORMAL)
-            self.btn_debug_matching.config(state=tk.NORMAL)
-        else:
-            self.btn_visualize.config(state=tk.DISABLED)
-            self.btn_inspect.config(state=tk.DISABLED)
-            self.btn_debug_matching.config(state=tk.DISABLED)
+        all_loaded = self.image_path and self.dxf_path
+        state = tk.NORMAL if all_loaded else tk.DISABLED
+        self.btn_visualize.config(state=state)
+        self.btn_inspect.config(state=state)
+        self.btn_debug_alignment.config(state=state)
 
-    # --- REWRITTEN: Main alignment function using Hu Moments ---
     def run_alignment_and_inspection(self):
-        print("\n--- Starting Alignment & Inspection (Hu Moments Methodology) ---")
-        
-        image_contour = self.find_image_contour(self.cv_image)
-        if image_contour is None:
-            return messagebox.showerror("Alignment Error", "No contour found in the image.")
-        image_contour = image_contour.astype(np.int32)
+        """
+        Aligns the CAD model to the image object using a robust vertex matching
+        strategy and overlays the result.
+        """
+        print("\n--- Starting Alignment & Inspection (Vertex Matching Methodology) ---")
+        if self.cv_image is None or self.cad_features['outline'].size == 0:
+            messagebox.showerror("Input Error", "Please load both an image and a DXF file with an 'OUTLINE' layer.")
+            return
 
-        dxf_outline = self.cad_features['outline']
-        if dxf_outline.size == 0:
-            return messagebox.showerror("Alignment Error", "No outline found in the DXF file.")
-        
-        print("1. Finding keypoints (corners) on both outlines...")
-        cad_mask, cad_transform = self._render_cad_to_image(dxf_outline, thickness=2)
-        img_mask = np.zeros(self.cv_image.shape[:2], dtype="uint8")
-        cv2.drawContours(img_mask, [image_contour], -1, 255, 1)
-
-        cad_keypoints = cv2.goodFeaturesToTrack(cad_mask, maxCorners=100, qualityLevel=0.01, minDistance=20)
-        img_keypoints = cv2.goodFeaturesToTrack(img_mask, maxCorners=100, qualityLevel=0.01, minDistance=20)
-
-        if cad_keypoints is None or img_keypoints is None:
-            return messagebox.showerror("Alignment Error", "Could not detect corners on one of the shapes.")
-
-        # Convert keypoints from rendered CAD space back to original DXF space
-        cad_kp_original_space = []
-        if cad_keypoints is not None:
-            for kp in cad_keypoints:
-                x, y = kp.ravel()
-                # Reverse the transformation from the render function
-                orig_x = (x - cad_transform['padding']) / cad_transform['scale'] + cad_transform['x_min']
-                orig_y = (y - cad_transform['padding']) / cad_transform['scale'] + cad_transform['y_min']
-                cad_kp_original_space.append([orig_x, orig_y])
-        cad_kp_original_space = np.array(cad_kp_original_space)
-
-        print("2. Matching keypoints using local shape (Hu Moments)...")
-        good_matches = []
-        for i, kp1_orig in enumerate(cad_kp_original_space):
-            hu_moments1 = self._get_hu_moments_for_keypoint(kp1_orig, dxf_outline)
-
-            best_match_idx = -1
-            min_dist = float('inf')
-            for j, kp2 in enumerate(img_keypoints):
-                hu_moments2 = self._get_hu_moments_for_keypoint(kp2.ravel(), image_contour.reshape(-1, 2))
-                
-                dist = cv2.matchShapes(hu_moments1, hu_moments2, cv2.CONTOURS_MATCH_I1, 0.0)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_match_idx = j
-            
-            good_matches.append((kp1_orig, img_keypoints[best_match_idx].ravel()))
-        
-        if len(good_matches) < 4:
-            return messagebox.showerror("Alignment Error", f"Not enough good matches found ({len(good_matches)}/4).")
-
-        src_pts = np.float32([match[0] for match in good_matches]).reshape(-1, 1, 2)
-        dst_pts = np.float32([match[1] for match in good_matches]).reshape(-1, 1, 2)
-        
-        print("3. Calculating Homography matrix...")
-        homography_matrix, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        homography_matrix, _, _ = self.align_shapes_by_vertices()
         if homography_matrix is None:
-            return messagebox.showerror("Alignment Error", "Could not compute the transformation matrix.")
-        print("   Homography calculated successfully.")
+            messagebox.showerror("Alignment Error", "Could not compute the transformation matrix. Check debug output for details.")
+            return
+        
+        print("1. Homography calculated successfully from vertex correspondences.")
+        print("2. Transforming all DXF features to image space...")
 
-        print("4. Creating blended result image...")
-        transformed_outline = cv2.perspectiveTransform(dxf_outline.reshape(-1, 1, 2), homography_matrix)
-        transformed_holes = [cv2.perspectiveTransform(h.reshape(-1, 1, 2), homography_matrix) for h in self.cad_features['holes']]
-        transformed_creases = [cv2.perspectiveTransform(c.reshape(-1, 1, 2), homography_matrix) for c in self.cad_features['creases']]
+        result_image = self.original_cv_image.copy()
+        
+        # Transform and draw the main outline
+        transformed_outline = cv2.perspectiveTransform(self.cad_features['outline'].reshape(-1, 1, 2), homography_matrix)
+        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
 
-        overlay = np.zeros_like(self.cv_image)
-        cv2.polylines(overlay, [transformed_outline.astype(np.int32)], True, (255, 0, 0), 2)
-        cv2.polylines(overlay, [h.astype(np.int32) for h in transformed_holes], True, (0, 255, 255), 2)
-        cv2.polylines(overlay, [c.astype(np.int32) for c in transformed_creases], False, (255, 255, 0), 2)
+        # Transform and draw holes and creases
+        for hole in self.cad_features['holes']:
+            transformed_hole = cv2.perspectiveTransform(hole.reshape(-1, 1, 2), homography_matrix)
+            cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
+        for crease in self.cad_features['creases']:
+            transformed_crease = cv2.perspectiveTransform(crease.reshape(-1, 1, 2), homography_matrix)
+            cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
         
-        blended_image = cv2.addWeighted(self.cv_image, 0.7, overlay, 0.4, 0)
-        
-        self.display_image = blended_image
-        self.update_image_display()
-        self.root.update_idletasks()
-        
-        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned and drawn on the image.")
+        print("3. Drawing final results...")
+        self.update_image_display(result_image)
+        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned and drawn on the image using vertex matching.")
         print("--- Inspection Complete ---")
 
-    # --- REWRITTEN: Debug function for the new Hu Moments approach ---
-    def run_feature_matching_debug(self):
-        print("\n--- Running Hu Moments Matching Debug Visualization ---")
-        
-        # 1. Get contours
-        image_contour = self.find_image_contour(self.cv_image)
-        if image_contour is None: return messagebox.showerror("Debug Error", "No contour found in the image.")
-        image_contour = image_contour.astype(np.int32)
-        
-        dxf_outline = self.cad_features['outline']
-        if dxf_outline.size == 0: return messagebox.showerror("Debug Error", "No outline found in the DXF file.")
-        
-        # 2. Get keypoints (corners)
-        cad_mask, _ = self._render_cad_to_image(dxf_outline, thickness=2)
-        img_mask = np.zeros(self.cv_image.shape[:2], dtype="uint8")
-        cv2.drawContours(img_mask, [image_contour], -1, 255, 1)
-        
-        cad_keypoints = cv2.goodFeaturesToTrack(cad_mask, maxCorners=100, qualityLevel=0.01, minDistance=20)
-        img_keypoints = cv2.goodFeaturesToTrack(img_mask, maxCorners=100, qualityLevel=0.01, minDistance=20)
+    def align_shapes_by_vertices(self):
+        """
+        Core alignment logic. Simplifies contours to vertices, finds the best
+        correspondence, and computes the homography.
+        """
+        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2)
+        img_contour = self.find_image_contour(self.cv_image)
+        if img_contour is None:
+            print("Error: No contour found in the image using HSV masking.")
+            return None, None, None
 
-        # 3. Visualize the detected keypoints
-        cad_kp_img = cv2.cvtColor(cad_mask, cv2.COLOR_GRAY2BGR)
-        img_kp_img = cv2.cvtColor(img_mask, cv2.COLOR_GRAY2BGR)
+        epsilon_cad = 0.01 * cv2.arcLength(cad_contour, True)
+        cad_vertices = cv2.approxPolyDP(cad_contour, epsilon_cad, True)
+        epsilon_img = 0.01 * cv2.arcLength(img_contour, True)
+        img_vertices = cv2.approxPolyDP(img_contour, epsilon_img, True)
         
-        if cad_keypoints is not None:
-            for kp in cad_keypoints:
-                x, y = kp.ravel()
-                cv2.circle(cad_kp_img, (int(x), int(y)), 5, (0, 255, 0), -1)
-        if img_keypoints is not None:
-             for kp in img_keypoints:
-                x, y = kp.ravel()
-                cv2.circle(img_kp_img, (int(x), int(y)), 5, (0, 255, 0), -1)
+        print(f"Simplified CAD to {len(cad_vertices)} vertices and Image to {len(img_vertices)} vertices.")
 
-        cv2.imshow("Debug 1: Corners on CAD", cad_kp_img)
-        cv2.imshow("Debug 2: Corners on Image", img_kp_img)
-        messagebox.showinfo("Debug", "Showing detected corners. Close these windows to continue.")
+        if len(cad_vertices) < 4 or len(img_vertices) < 4 or len(cad_vertices) != len(img_vertices):
+            messagebox.showwarning("Alignment Warning", f"Could not simplify shapes to an equal number of vertices (CAD: {len(cad_vertices)}, Image: {len(img_vertices)}). Alignment may fail.")
+            return None, None, None
 
-        # 4. Perform matching and prepare for visualization
-        # ... (This section duplicates logic from the main function for visualization)
-        # ... You can expand this to draw the final match lines if needed.
-        print("Debug finished. Check the corner detection images.")
+        img_vertices_ordered = self._find_best_vertex_correspondence(cad_vertices, img_vertices)
+        if img_vertices_ordered is None:
+            print("Error: Could not determine vertex correspondence.")
+            return None, None, None
+
+        homography_matrix, _ = cv2.findHomography(cad_vertices, img_vertices_ordered, cv2.RANSAC, 5.0)
+        return homography_matrix, cad_vertices, img_vertices_ordered
+
+    def _find_best_vertex_correspondence(self, cad_verts, img_verts):
+        """
+        Finds the optimal ordering of image vertices to match the CAD vertices
+        by testing all circular shifts.
+        """
+        min_dist = float('inf')
+        best_shift = -1
+        for i in range(len(img_verts)):
+            shifted_img_verts = np.roll(img_verts, i, axis=0)
+            dist = np.sum((cad_verts - shifted_img_verts)**2)
+            if dist < min_dist:
+                min_dist = dist
+                best_shift = i
+        return np.roll(img_verts, best_shift, axis=0) if best_shift != -1 else None
+
+    def run_alignment_debug(self):
+        """
+        Generates and displays intermediate images from the vertex matching
+        process to help diagnose alignment failures.
+        """
+        print("\n--- Running Alignment Debug Visualization ---")
 
 
-    # --- REWRITTEN: Renders CAD and returns transform info ---
-    def _render_cad_to_image(self, outline, holes=[], creases=[], padding=50, thickness=-1):
-        all_points = [outline] + holes + creases
-        if not any(p.size > 0 for p in all_points):
-             return np.zeros((100, 100), dtype="uint8"), None
-        v_stack = np.vstack([p for p in all_points if p.size > 0])
-        x_min, y_min = np.min(v_stack, axis=0)
-        x_max, y_max = np.max(v_stack, axis=0)
-        cad_w, cad_h = x_max - x_min, y_max - y_min
-        if cad_w == 0 or cad_h == 0: return np.zeros((100, 100), dtype="uint8"), None
-
-        TARGET_WIDTH = 800
-        scale = TARGET_WIDTH / cad_w
-        canvas_w = int(TARGET_WIDTH + padding * 2)
-        canvas_h = int(cad_h * scale + padding * 2)
-        canvas = np.zeros((canvas_h, canvas_w), dtype="uint8")
-
-        def transform(points):
-            return ((points - [x_min, y_min]) * scale + padding).astype(int)
-
-        cv2.polylines(canvas, [transform(outline)], True, 255, thickness)
+        # 1. Visualize the detected and simplified image contour
+        img_contour = self.find_image_contour(self.cv_image)
+        if img_contour is None: return messagebox.showerror("Debug Error", "No contour found in image.")
         
-        # Return the canvas AND the transformation info needed to go backwards
-        transform_info = {'x_min': x_min, 'y_min': y_min, 'scale': scale, 'padding': padding}
-        return canvas, transform_info
+        epsilon_img = 0.01 * cv2.arcLength(img_contour, True)
+        img_vertices = cv2.approxPolyDP(img_contour, epsilon_img, True)
 
-    # --- NEW: Helper function for Hu Moments matching ---
-    def _get_hu_moments_for_keypoint(self, keypoint, contour, neighborhood_size=50):
-        distances = np.linalg.norm(contour - keypoint, axis=1)
-        closest_idx = np.argmin(distances)
-        num_contour_pts = len(contour)
-        half_size = neighborhood_size // 2
+        debug_img_contours = self.original_cv_image.copy()
+        cv2.drawContours(debug_img_contours, [img_contour], -1, (255, 0, 0), 2)
+        for pt in img_vertices:
+            cv2.circle(debug_img_contours, tuple(pt[0]), 7, (0, 0, 255), -1)
+        cv2.imshow("Debug 2: Image Contour and Vertices", debug_img_contours)
         
-        indices = [(closest_idx - half_size + i + num_contour_pts) % num_contour_pts for i in range(neighborhood_size)]
-        local_neighborhood = contour[indices]
-        
-        moments = cv2.moments(local_neighborhood)
-        hu_moments = cv2.HuMoments(moments)
-        
-        # Log scale transform to make moments more comparable
-        with np.errstate(divide='ignore', invalid='ignore'):
-            log_hu = -np.sign(hu_moments) * np.log10(np.abs(hu_moments))
-            log_hu[np.isneginf(log_hu)] = 0 # Handle log(0) case
-        return log_hu
+        # 2. Visualize final vertex correspondences
+        _, _, img_v_final = self.align_shapes_by_vertices()
+        if img_v_final is None: return
+
+        correspondence_img = self.original_cv_image.copy()
+        for i, pt_array in enumerate(img_v_final):
+            pt_img = tuple(pt_array.ravel().astype(int))
+            cv2.circle(correspondence_img, pt_img, 8, (0, 255, 0), -1)
+            cv2.putText(correspondence_img, str(i), (pt_img[0] + 5, pt_img[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        cv2.imshow("Debug 3: Matched Image Vertices (Numbered)", correspondence_img)
+        messagebox.showinfo("Debug", "Debug windows opened. Examine them to diagnose the alignment process.")
 
     def on_resize(self, event=None):
-        if self.display_image is not None: self.update_image_display()
+        if self.cv_image is not None: self.update_image_display(self.cv_image)
 
-    def update_image_display(self):
-        if self.display_image is None: return
-        image_to_show = self.display_image
+    def update_image_display(self, image_to_show):
+        if image_to_show is None: return
+        self.cv_image = image_to_show
         frame_w, frame_h = self.image_frame.winfo_width(), self.image_frame.winfo_height()
         if frame_w <= 1 or frame_h <= 1: return
         img_h, img_w = image_to_show.shape[:2]
@@ -325,6 +262,7 @@ class InspectionApp:
         self.tk_image = ImageTk.PhotoImage(image=pil_image)
         self.image_label.config(image=self.tk_image)
 
+    # --- UNCHANGED AS REQUESTED: Using original HSV-based contour detection ---
     def find_image_contour(self, image):
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
@@ -345,26 +283,28 @@ class InspectionApp:
             elif dxf_type in ('LWPOLYLINE', 'POLYLINE'):
                 points = [(p[0], p[1]) for p in entity.get_points('xy')]
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
-                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.001)]
+                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
         except Exception as e:
             print(f"   Warning: Could not process entity {dxf_type}: {e}")
         return points
 
     def _assemble_paths(self, segments):
         if not segments: return []
-        paths, tolerance = [], 1e-6
+        paths = []
+        tolerance = 1e-6
         while segments:
             current_path = list(segments.pop(0))
             while True:
                 extended = False
                 for i, segment in enumerate(segments):
                     p_start, p_end = segment
-                    if math.dist(current_path[-1], p_start) < tolerance:
+                    last_point_in_path = current_path[-1]
+                    if math.dist(last_point_in_path, p_start) < tolerance:
                         current_path.append(p_end)
                         segments.pop(i)
                         extended = True
                         break
-                    elif math.dist(current_path[-1], p_end) < tolerance:
+                    elif math.dist(last_point_in_path, p_end) < tolerance:
                         current_path.append(p_start)
                         segments.pop(i)
                         extended = True
@@ -374,7 +314,7 @@ class InspectionApp:
         return paths
 
     def reset_image_state(self):
-        self.image_path, self.cv_image, self.display_image = None, None, None
+        self.image_path, self.cv_image, self.original_cv_image = None, None, None
         self.lbl_image_status.config(text="Image: None")
         self.image_label.config(image='')
         self._check_files_loaded()
@@ -386,31 +326,56 @@ class InspectionApp:
         self._check_files_loaded()
         
     def run_visualization(self):
+        """
+        Displays visualizations of both the parsed CAD features and the
+        detected image contour in separate windows for comparison.
+        """
         print("--- Running Input Visualization ---")
-        if not (self.cad_features['outline'].size > 0 or self.cad_features['holes'] or self.cad_features['creases']):
-            return messagebox.showinfo("Visualize", "No CAD features were found in the loaded DXF file.")
-        all_points_list = [p for p in [self.cad_features['outline']] + self.cad_features['holes'] + self.cad_features['creases'] if p.size > 0]
-        if not all_points_list: return
-        all_points = np.vstack(all_points_list)
-        x_min, y_min, x_max, y_max = *np.min(all_points, axis=0), *np.max(all_points, axis=0)
-        CANVAS_W, CANVAS_H, padding = 800, 600, 50
-        cad_w, cad_h = x_max - x_min, y_max - y_min
-        if cad_w > 0 and cad_h > 0:
-            scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
-            cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
-            def transform_pt(points):
-                return ((points - [x_min, y_min]) * [scale, -scale] + [padding, CANVAS_H - padding]).astype(np.int32)
-            if self.cad_features['outline'].size > 0:
-                cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
-            cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['holes']], True, (0, 255, 255), 1)
-            cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['creases']], False, (255, 255, 0), 1)
-            cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
+
+        # Visualize Parsed CAD Data
+        cad_features_found = self.cad_features['outline'].size > 0 or \
+                             any(self.cad_features['holes']) or \
+                             any(self.cad_features['creases'])
+
+        if not cad_features_found:
+            messagebox.showinfo("Visualize", "No CAD features were found in the loaded DXF file.")
+        else:
+            all_points_list = []
+            if self.cad_features['outline'].size > 0: all_points_list.append(self.cad_features['outline'])
+            if self.cad_features['holes']: all_points_list.extend(self.cad_features['holes'])
+            if self.cad_features['creases']: all_points_list.extend(self.cad_features['creases'])
+
+            all_points = np.vstack(all_points_list)
+            x_min, y_min = np.min(all_points, axis=0)
+            x_max, y_max = np.max(all_points, axis=0)
+
+            CANVAS_W, CANVAS_H, padding = 800, 600, 50
+            cad_w, cad_h = x_max - x_min, y_max - y_min
+            
+            if cad_w > 0 and cad_h > 0:
+                scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
+                cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
+                
+                def transform_pt(points):
+                    return ((points - [x_min, y_min]) * [scale, -scale] + [padding, CANVAS_H - padding]).astype(np.int32)
+                
+                if self.cad_features['outline'].size > 0:
+                    cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
+                cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['holes']], True, (0, 255, 255), 1)
+                cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['creases']], False, (255, 255, 0), 1)
+                cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
+
+        # Visualize Detected Image Contour
         image_contour = self.find_image_contour(self.cv_image)
         if image_contour is not None:
-            debug_image = self.cv_image.copy()
+            debug_image = self.original_cv_image.copy()
             cv2.drawContours(debug_image, [image_contour.astype(np.int32)], -1, (255, 0, 255), 3)
             cv2.imshow("DEBUG: Detected Image Contour", debug_image)
+        else:
+            messagebox.showinfo("Visualize", "No contour detected in image with current HSV settings.")
+        
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
