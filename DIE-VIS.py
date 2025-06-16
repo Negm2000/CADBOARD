@@ -10,10 +10,10 @@ import traceback
 
 class InspectionApp:
     """
-    A simplified GUI application to visualize a DXF file and an image contour.
+    A GUI application to visualize a DXF file (including outlines, holes, and creases) 
+    and an image contour.
     """
     def __init__(self, root):
-
         self.root = root
         self.root.title("DIE-VIS: Visualizer")
         self.root.geometry("1200x850")
@@ -22,8 +22,8 @@ class InspectionApp:
         self.image_path = None
         self.dxf_path = None
         self.cv_image = None
-        # Simplified feature storage
-        self.cad_features = {'outline': np.array([]), 'holes': []}
+        # NEW: Added 'creases' to the initial state
+        self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         
         # --- UI Colors and Styles ---
         self.colors = {
@@ -64,16 +64,12 @@ class InspectionApp:
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.image_label.bind("<Configure>", self.on_resize)
 
-
     def setup_styles(self):
-
         style = ttk.Style()
         style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'))
         style.map("TButton", background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')])
 
-
     def load_image(self):
-
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return
         self.image_path = filepath
@@ -88,10 +84,6 @@ class InspectionApp:
             self.reset_image_state()
 
     def load_dxf(self):
-        """
-        Loads a DXF, extracts geometry as segments, and assembles them into
-        continuous, ordered paths using the path assembly algorithm.
-        """
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
         if not filepath: return
         self.dxf_path = filepath
@@ -100,48 +92,54 @@ class InspectionApp:
             doc = ezdxf.readfile(self.dxf_path)
             msp = doc.modelspace()
             
-            # Reset data-holding variables
-            self.cad_features = {'outline': np.array([]), 'holes': []}
+            # CORRECTED: Only reset the features dictionary. Do NOT call the full
+            # reset function, which was incorrectly clearing the dxf_path.
+            self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
 
             # --- Process OUTLINE layer ---
             print("1. Processing OUTLINE layer segments...")
             outline_segments = []
             for entity in msp.query('*[layer=="OUTLINE"]'):
                 points = self._extract_entity_points(entity)
-                # Convert list of points [p1, p2, p3] to segments [(p1,p2), (p2,p3)]
                 for i in range(len(points) - 1):
                     outline_segments.append((points[i], points[i+1]))
             
             if outline_segments:
-                print(f"   Found {len(outline_segments)} raw outline segments. Assembling...")
                 assembled_outlines = self._assemble_paths(outline_segments)
                 if assembled_outlines:
-                    # Assume the longest assembled path is the main outline
                     main_outline = max(assembled_outlines, key=len)
                     self.cad_features['outline'] = np.array(main_outline, dtype=np.float32)
-                    print(f"   Assembled outline into a single path with {len(main_outline)} points.")
+                    print(f"   Assembled outline with {len(main_outline)} points.")
 
-            # --- Process HOLES layer (CORRECTED LOGIC) ---
+            # --- Process HOLES layer ---
             print("2. Processing HOLES layer segments...")
-            
-            # First, gather all segments from all entities on the HOLES layer into one list.
             all_hole_segments = []
             for entity in msp.query('*[layer=="HOLES"]'):
                 points = self._extract_entity_points(entity)
                 for i in range(len(points) - 1):
                     all_hole_segments.append((points[i], points[i+1]))
 
-            # Now, run the assembly algorithm on the complete collection of hole segments.
             if all_hole_segments:
-                print(f"   Found {len(all_hole_segments)} raw hole segments. Assembling...")
                 assembled_hole_paths = self._assemble_paths(all_hole_segments)
-                
-                # Each continuous path found is a complete hole.
                 for path in assembled_hole_paths:
                     self.cad_features['holes'].append(np.array(path, dtype=np.float32))
-
             print(f"   Assembled {len(self.cad_features['holes'])} hole entities.")
             
+            # --- Process CREASES layer ---
+            print("3. Processing CREASES layer segments...")
+            all_crease_segments = []
+            for entity in msp.query('*[layer=="CREASES"]'):
+                points = self._extract_entity_points(entity)
+                for i in range(len(points) - 1):
+                    all_crease_segments.append((points[i], points[i+1]))
+
+            if all_crease_segments:
+                assembled_crease_paths = self._assemble_paths(all_crease_segments)
+                for path in assembled_crease_paths:
+                    self.cad_features['creases'].append(np.array(path, dtype=np.float32))
+            print(f"   Assembled {len(self.cad_features['creases'])} crease entities.")
+            
+            # This line will now work correctly
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
             print("--- DXF Parse Complete ---")
@@ -149,76 +147,53 @@ class InspectionApp:
         except Exception as e:
             error_details = traceback.format_exc()
             messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{e}\n\nDetails:\n{error_details}")
+            # The reset function should only be called here, in case of an error.
             self.reset_dxf_state()
 
     def _assemble_paths(self, segments):
-        """
-        Assembles a list of unordered segments into one or more continuous paths.
-        This implements the "Path Assembly and Vertex Ordering" algorithm.
-        """
         if not segments:
             return []
-
-        # Create a copy to modify
         segments = list(segments)
         paths = []
         tolerance = 1e-6
-
-        # While there are still segments to process
         while segments:
-            # 1. Start a New Path
             current_path = list(segments.pop(0))
-
-            # 2. Extend the Path
             while True:
                 extended = False
-                # Search for a segment that connects to the end of our path
                 for i, segment in enumerate(segments):
                     p_start, p_end = segment
                     last_point_in_path = current_path[-1]
-
-                    # Check for a connection (forward or reverse)
                     if math.dist(last_point_in_path, p_start) < tolerance:
                         current_path.append(p_end)
                         segments.pop(i)
                         extended = True
-                        break # Restart search with the new end point
+                        break
                     elif math.dist(last_point_in_path, p_end) < tolerance:
                         current_path.append(p_start)
                         segments.pop(i)
                         extended = True
-                        break # Restart search with the new end point
-                
-                # If we went through all segments and found no connection, the path is done
+                        break
                 if not extended:
                     break
-            
-            # 3. Store the Completed Path
             paths.append(current_path)
-            
         return paths
 
     def _check_files_loaded(self):
-
         if self.image_path and self.dxf_path:
             self.btn_visualize.config(state=tk.NORMAL)
         else:
             self.btn_visualize.config(state=tk.DISABLED)
 
     def on_resize(self, event=None):
-
         if self.cv_image is not None: self.update_image_display(self.cv_image)
 
     def update_image_display(self, image_to_show):
-
         if image_to_show is None: return
         frame_w, frame_h = self.image_frame.winfo_width(), self.image_frame.winfo_height()
         if frame_w <= 1 or frame_h <= 1: return
-        
         img_h, img_w = image_to_show.shape[:2]
         scale = min(frame_w / img_w, frame_h / img_h)
         new_w, new_h = int(img_w * scale), int(img_h * scale)
-        
         display_image = cv2.resize(image_to_show, (new_w, new_h), interpolation=cv2.INTER_AREA)
         rgb_image = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(rgb_image)
@@ -226,42 +201,56 @@ class InspectionApp:
         self.image_label.config(image=self.tk_image)
 
     def run_visualization(self):
-
         print("--- Running Visualization ---")
         
-        # --- 1. Visualize Parsed CAD Data ---
-        if self.cad_features['outline'].size > 0 or self.cad_features['holes']:
-            all_points_list = []
-            if self.cad_features['outline'].size > 0:
-                all_points_list.append(self.cad_features['outline'])
-            if self.cad_features['holes']:
-                all_points_list.extend(self.cad_features['holes'])
-            
-            all_points = np.vstack(all_points_list)
-            x_min, y_min = np.min(all_points, axis=0)
-            x_max, y_max = np.max(all_points, axis=0)
-            
-            CANVAS_W, CANVAS_H = 800, 600
-            padding = 50
-            cad_w, cad_h = x_max - x_min, y_max - y_min
-            
-            if cad_w > 0 and cad_h > 0:
-                scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
-                cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-                
-                def transform_pt(points):
-                    transformed = (points - [x_min, y_min]) * [scale, -scale]
-                    transformed += [padding, (CANVAS_H - padding)]
-                    return transformed.astype(np.int32)
+        # Check if there is any CAD data to visualize
+        if not (self.cad_features['outline'].size > 0 or self.cad_features['holes'] or self.cad_features['creases']):
+            messagebox.showinfo("Visualize", "No CAD features were found in the loaded DXF file.")
+            return
 
+        # --- 1. Visualize Parsed CAD Data ---
+        all_points_list = []
+        if self.cad_features['outline'].size > 0:
+            all_points_list.append(self.cad_features['outline'])
+        if self.cad_features['holes']:
+            all_points_list.extend(self.cad_features['holes'])
+        # NEW: Add crease points to the list for bounds calculation
+        if self.cad_features['creases']:
+            all_points_list.extend(self.cad_features['creases'])
+        
+        all_points = np.vstack(all_points_list)
+        x_min, y_min = np.min(all_points, axis=0)
+        x_max, y_max = np.max(all_points, axis=0)
+        
+        CANVAS_W, CANVAS_H = 800, 600
+        padding = 50
+        cad_w, cad_h = x_max - x_min, y_max - y_min
+        
+        if cad_w > 0 and cad_h > 0:
+            scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
+            cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            
+            def transform_pt(points):
+                transformed = (points - [x_min, y_min]) * [scale, -scale]
+                transformed += [padding, (CANVAS_H - padding)]
+                return transformed.astype(np.int32)
+
+            # Draw outline (white)
+            if self.cad_features['outline'].size > 0:
                 outline_shifted = transform_pt(self.cad_features['outline'])
                 cv2.polylines(cad_canvas, [outline_shifted], isClosed=False, color=(255, 255, 255), thickness=1)
+            
+            # Draw holes (yellow)
+            for hole_points in self.cad_features['holes']:
+                hole_shifted = transform_pt(hole_points)
+                cv2.polylines(cad_canvas, [hole_shifted], isClosed=True, color=(0, 255, 255), thickness=1)
                 
-                for hole_points in self.cad_features['holes']:
-                    hole_shifted = transform_pt(hole_points)
-                    cv2.polylines(cad_canvas, [hole_shifted], isClosed=True, color=(0, 255, 255), thickness=1)
-                    
-                cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
+            # NEW: Draw creases (cyan)
+            for crease_points in self.cad_features['creases']:
+                crease_shifted = transform_pt(crease_points)
+                cv2.polylines(cad_canvas, [crease_shifted], isClosed=False, color=(255, 255, 0), thickness=1)
+                
+            cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
 
         # --- 2. Visualize Image Contour ---
         image_contour = self.find_image_contour(self.cv_image)
@@ -273,44 +262,34 @@ class InspectionApp:
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
 
     def find_image_contour(self, image):
-
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv = np.array([5, 50, 50])
         upper_bound_hsv = np.array([30, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        
         kernel = np.ones((5,5), np.uint8)
         color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
         color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
-
         contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return max(contours, key=cv2.contourArea).astype(np.float32) if contours else None
 
     def _extract_entity_points(self, entity):
-
         points = []
         dxf_type = entity.dxftype()
         try:
             if dxf_type == 'LINE':
                 start, end = entity.dxf.start, entity.dxf.end
                 points = [(start.x, start.y), (end.x, end.y)]
-
             elif dxf_type in ('LWPOLYLINE', 'POLYLINE'):
                 points = [(p[0], p[1]) for p in entity.get_points('xy')]
-
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
-                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
-
+                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.001)]
             else:
                 print(f"   Info: Skipping unhandled entity type '{dxf_type}'")
-
         except Exception as e:
             print(f"   Warning: Could not process entity {dxf_type}: {e}")
-        
         return points
 
     def _remove_consecutive_duplicates(self, points, tolerance=1e-6):
-
         if not points:
             return []
         filtered = [points[0]]
@@ -322,19 +301,17 @@ class InspectionApp:
         return filtered
 
     def reset_image_state(self):
-
         self.image_path, self.cv_image = None, None
         self.lbl_image_status.config(text="Image: None")
         self.image_label.config(image='')
         self._check_files_loaded()
 
     def reset_dxf_state(self):
-
         self.dxf_path = None
-        self.cad_features = {'outline': np.array([]), 'holes': []}
+        # NEW: Reset creases along with other features
+        self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         self.lbl_dxf_status.config(text="DXF: None")
         self._check_files_loaded()
-
 
 if __name__ == "__main__":
     root = tk.Tk()
