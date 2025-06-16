@@ -13,7 +13,7 @@ class InspectionApp:
     A simplified GUI application to visualize a DXF file and an image contour.
     """
     def __init__(self, root):
-        # ... (This method remains unchanged)
+
         self.root = root
         self.root.title("DIE-VIS: Visualizer")
         self.root.geometry("1200x850")
@@ -66,14 +66,14 @@ class InspectionApp:
 
 
     def setup_styles(self):
-        # ... (This method remains unchanged)
+
         style = ttk.Style()
         style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'))
         style.map("TButton", background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')])
 
 
     def load_image(self):
-        # ... (This method remains unchanged)
+
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return
         self.image_path = filepath
@@ -195,18 +195,18 @@ class InspectionApp:
         return paths
 
     def _check_files_loaded(self):
-        # ... (This method remains unchanged)
+
         if self.image_path and self.dxf_path:
             self.btn_visualize.config(state=tk.NORMAL)
         else:
             self.btn_visualize.config(state=tk.DISABLED)
 
     def on_resize(self, event=None):
-        # ... (This method remains unchanged)
+
         if self.cv_image is not None: self.update_image_display(self.cv_image)
 
     def update_image_display(self, image_to_show):
-        # ... (This method remains unchanged)
+
         if image_to_show is None: return
         frame_w, frame_h = self.image_frame.winfo_width(), self.image_frame.winfo_height()
         if frame_w <= 1 or frame_h <= 1: return
@@ -222,7 +222,7 @@ class InspectionApp:
         self.image_label.config(image=self.tk_image)
 
     def run_visualization(self):
-        # ... (This method remains unchanged)
+
         print("--- Running Visualization ---")
         
         # --- 1. Visualize Parsed CAD Data ---
@@ -269,7 +269,7 @@ class InspectionApp:
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
 
     def find_image_contour(self, image):
-        # ... (This method remains unchanged)
+
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv = np.array([5, 50, 50])
         upper_bound_hsv = np.array([30, 255, 255])
@@ -283,7 +283,7 @@ class InspectionApp:
         return max(contours, key=cv2.contourArea).astype(np.float32) if contours else None
 
     def _extract_entity_points(self, entity):
-        # ... (This method remains unchanged)
+
         points = []
         dxf_type = entity.dxftype()
         try:
@@ -295,7 +295,7 @@ class InspectionApp:
                 points = [(p[0], p[1]) for p in entity.get_points('xy')]
 
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
-                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.1)]
+                points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
 
             else:
                 print(f"   Info: Skipping unhandled entity type '{dxf_type}'")
@@ -306,7 +306,7 @@ class InspectionApp:
         return points
 
     def _remove_consecutive_duplicates(self, points, tolerance=1e-6):
-        # ... (This method remains unchanged)
+
         if not points:
             return []
         filtered = [points[0]]
@@ -318,14 +318,14 @@ class InspectionApp:
         return filtered
 
     def reset_image_state(self):
-        # ... (This method remains unchanged)
+
         self.image_path, self.cv_image = None, None
         self.lbl_image_status.config(text="Image: None")
         self.image_label.config(image='')
         self._check_files_loaded()
 
     def reset_dxf_state(self):
-        # ... (This method remains unchanged)
+
         self.dxf_path = None
         self.cad_features = {'outline': np.array([]), 'holes': []}
         self.lbl_dxf_status.config(text="DXF: None")
