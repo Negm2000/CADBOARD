@@ -121,22 +121,26 @@ class InspectionApp:
                     self.cad_features['outline'] = np.array(main_outline, dtype=np.float32)
                     print(f"   Assembled outline into a single path with {len(main_outline)} points.")
 
-            # --- Process HOLES layer ---
+            # --- Process HOLES layer (CORRECTED LOGIC) ---
             print("2. Processing HOLES layer segments...")
-            # This logic assumes each entity on the HOLES layer is a separate hole.
-            # For complex holes made of multiple entities, a grouping step would be needed here.
+            
+            # First, gather all segments from all entities on the HOLES layer into one list.
+            all_hole_segments = []
             for entity in msp.query('*[layer=="HOLES"]'):
-                hole_segments = []
                 points = self._extract_entity_points(entity)
                 for i in range(len(points) - 1):
-                    hole_segments.append((points[i], points[i+1]))
-                
-                if hole_segments:
-                    assembled_holes = self._assemble_paths(hole_segments)
-                    for path in assembled_holes:
-                        self.cad_features['holes'].append(np.array(path, dtype=np.float32))
+                    all_hole_segments.append((points[i], points[i+1]))
 
-            print(f"   Found and assembled {len(self.cad_features['holes'])} hole entities.")
+            # Now, run the assembly algorithm on the complete collection of hole segments.
+            if all_hole_segments:
+                print(f"   Found {len(all_hole_segments)} raw hole segments. Assembling...")
+                assembled_hole_paths = self._assemble_paths(all_hole_segments)
+                
+                # Each continuous path found is a complete hole.
+                for path in assembled_hole_paths:
+                    self.cad_features['holes'].append(np.array(path, dtype=np.float32))
+
+            print(f"   Assembled {len(self.cad_features['holes'])} hole entities.")
             
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
