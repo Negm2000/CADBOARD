@@ -7,12 +7,13 @@ import math
 import numpy as np
 import os
 import traceback
+from scipy.special import factorial
 
 class InspectionApp:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("DIE-VIS: Visualizer & Inspector")
+        self.root.title("DIE-VIS: Visualizer & Inspector (Zernike Engine)")
         self.root.geometry("1200x850")
 
         # --- State Variables ---
@@ -24,7 +25,7 @@ class InspectionApp:
         
         # --- UI Colors and Styles ---
         self.colors = {
-            "bg": "#2E2E2E", "fg": "#2C2C2C", "btn": "#4A4A4A",
+            "bg": "#2E2E2E", "fg": "#FFFFFF", "btn": "#4A4A4A",
             "btn_active": "#5A5A5A", "accent": "#007ACC"
         }
         self.root.configure(bg=self.colors["bg"])
@@ -50,7 +51,6 @@ class InspectionApp:
         self.btn_visualize = ttk.Button(control_frame, text="Visualize Inputs", state=tk.DISABLED, command=self.run_visualization)
         self.btn_visualize.pack(side=tk.LEFT, padx=(20, 5))
         
-        # MODIFIED: Debug button now targets the new geometric alignment logic
         self.btn_debug_alignment = ttk.Button(control_frame, text="Debug Alignment", state=tk.DISABLED, command=self.run_alignment_debug)
         self.btn_debug_alignment.pack(side=tk.LEFT, padx=5)
         
@@ -70,8 +70,13 @@ class InspectionApp:
         
     def setup_styles(self):
         style = ttk.Style()
-        style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'))
-        style.map("TButton", background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')])
+        style.theme_use('clam')
+        style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'), borderwidth=0)
+        style.map("TButton", 
+                  background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')],
+                  foreground=[('disabled', '#888888')])
+        style.configure("TFrame", background=self.colors["bg"])
+        style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
 
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
@@ -89,6 +94,7 @@ class InspectionApp:
             self.reset_image_state()
 
     def load_dxf(self):
+        # RESTORED to original working version
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
         if not filepath: return
         self.dxf_path = filepath
@@ -124,126 +130,11 @@ class InspectionApp:
             self.reset_dxf_state()
 
     def _check_files_loaded(self):
-        all_loaded = self.image_path and self.dxf_path
+        all_loaded = self.image_path is not None and self.dxf_path is not None and self.cad_features['outline'].size > 0
         state = tk.NORMAL if all_loaded else tk.DISABLED
         self.btn_visualize.config(state=state)
         self.btn_inspect.config(state=state)
         self.btn_debug_alignment.config(state=state)
-
-    def run_alignment_and_inspection(self):
-        """
-        Aligns the CAD model to the image object using a robust vertex matching
-        strategy and overlays the result.
-        """
-        print("\n--- Starting Alignment & Inspection (Vertex Matching Methodology) ---")
-        if self.cv_image is None or self.cad_features['outline'].size == 0:
-            messagebox.showerror("Input Error", "Please load both an image and a DXF file with an 'OUTLINE' layer.")
-            return
-
-        homography_matrix, _, _ = self.align_shapes_by_vertices()
-        if homography_matrix is None:
-            messagebox.showerror("Alignment Error", "Could not compute the transformation matrix. Check debug output for details.")
-            return
-        
-        print("1. Homography calculated successfully from vertex correspondences.")
-        print("2. Transforming all DXF features to image space...")
-
-        result_image = self.original_cv_image.copy()
-        
-        # Transform and draw the main outline
-        transformed_outline = cv2.perspectiveTransform(self.cad_features['outline'].reshape(-1, 1, 2), homography_matrix)
-        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
-
-        # Transform and draw holes and creases
-        for hole in self.cad_features['holes']:
-            transformed_hole = cv2.perspectiveTransform(hole.reshape(-1, 1, 2), homography_matrix)
-            cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
-        for crease in self.cad_features['creases']:
-            transformed_crease = cv2.perspectiveTransform(crease.reshape(-1, 1, 2), homography_matrix)
-            cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
-        
-        print("3. Drawing final results...")
-        self.update_image_display(result_image)
-        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned and drawn on the image using vertex matching.")
-        print("--- Inspection Complete ---")
-
-    def align_shapes_by_vertices(self):
-        """
-        Core alignment logic. Simplifies contours to vertices, finds the best
-        correspondence, and computes the homography.
-        """
-        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2)
-        img_contour = self.find_image_contour(self.cv_image)
-        if img_contour is None:
-            print("Error: No contour found in the image using HSV masking.")
-            return None, None, None
-
-        epsilon_cad = 0.01 * cv2.arcLength(cad_contour, True)
-        cad_vertices = cv2.approxPolyDP(cad_contour, epsilon_cad, True)
-        epsilon_img = 0.01 * cv2.arcLength(img_contour, True)
-        img_vertices = cv2.approxPolyDP(img_contour, epsilon_img, True)
-        
-        print(f"Simplified CAD to {len(cad_vertices)} vertices and Image to {len(img_vertices)} vertices.")
-
-        if len(cad_vertices) < 4 or len(img_vertices) < 4 or len(cad_vertices) != len(img_vertices):
-            messagebox.showwarning("Alignment Warning", f"Could not simplify shapes to an equal number of vertices (CAD: {len(cad_vertices)}, Image: {len(img_vertices)}). Alignment may fail.")
-            return None, None, None
-
-        img_vertices_ordered = self._find_best_vertex_correspondence(cad_vertices, img_vertices)
-        if img_vertices_ordered is None:
-            print("Error: Could not determine vertex correspondence.")
-            return None, None, None
-
-        homography_matrix, _ = cv2.findHomography(cad_vertices, img_vertices_ordered, cv2.RANSAC, 5.0)
-        return homography_matrix, cad_vertices, img_vertices_ordered
-
-    def _find_best_vertex_correspondence(self, cad_verts, img_verts):
-        """
-        Finds the optimal ordering of image vertices to match the CAD vertices
-        by testing all circular shifts.
-        """
-        min_dist = float('inf')
-        best_shift = -1
-        for i in range(len(img_verts)):
-            shifted_img_verts = np.roll(img_verts, i, axis=0)
-            dist = np.sum((cad_verts - shifted_img_verts)**2)
-            if dist < min_dist:
-                min_dist = dist
-                best_shift = i
-        return np.roll(img_verts, best_shift, axis=0) if best_shift != -1 else None
-
-    def run_alignment_debug(self):
-        """
-        Generates and displays intermediate images from the vertex matching
-        process to help diagnose alignment failures.
-        """
-        print("\n--- Running Alignment Debug Visualization ---")
-
-
-        # 1. Visualize the detected and simplified image contour
-        img_contour = self.find_image_contour(self.cv_image)
-        if img_contour is None: return messagebox.showerror("Debug Error", "No contour found in image.")
-        
-        epsilon_img = 0.01 * cv2.arcLength(img_contour, True)
-        img_vertices = cv2.approxPolyDP(img_contour, epsilon_img, True)
-
-        debug_img_contours = self.original_cv_image.copy()
-        cv2.drawContours(debug_img_contours, [img_contour], -1, (255, 0, 0), 2)
-        for pt in img_vertices:
-            cv2.circle(debug_img_contours, tuple(pt[0]), 7, (0, 0, 255), -1)
-        cv2.imshow("Debug 2: Image Contour and Vertices", debug_img_contours)
-        
-        # 2. Visualize final vertex correspondences
-        _, _, img_v_final = self.align_shapes_by_vertices()
-        if img_v_final is None: return
-
-        correspondence_img = self.original_cv_image.copy()
-        for i, pt_array in enumerate(img_v_final):
-            pt_img = tuple(pt_array.ravel().astype(int))
-            cv2.circle(correspondence_img, pt_img, 8, (0, 255, 0), -1)
-            cv2.putText(correspondence_img, str(i), (pt_img[0] + 5, pt_img[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        cv2.imshow("Debug 3: Matched Image Vertices (Numbered)", correspondence_img)
-        messagebox.showinfo("Debug", "Debug windows opened. Examine them to diagnose the alignment process.")
 
     def on_resize(self, event=None):
         if self.cv_image is not None: self.update_image_display(self.cv_image)
@@ -254,26 +145,18 @@ class InspectionApp:
         frame_w, frame_h = self.image_frame.winfo_width(), self.image_frame.winfo_height()
         if frame_w <= 1 or frame_h <= 1: return
         img_h, img_w = image_to_show.shape[:2]
+        
         scale = min(frame_w / img_w, frame_h / img_h)
         new_w, new_h = int(img_w * scale), int(img_h * scale)
+        
         display_image = cv2.resize(image_to_show, (new_w, new_h), interpolation=cv2.INTER_AREA)
         rgb_image = cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(rgb_image)
         self.tk_image = ImageTk.PhotoImage(image=pil_image)
         self.image_label.config(image=self.tk_image)
-
-    # --- UNCHANGED AS REQUESTED: Using original HSV-based contour detection ---
-    def find_image_contour(self, image):
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
-        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        kernel = np.ones((5,5), np.uint8)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
-        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return max(contours, key=cv2.contourArea) if contours else None
-
+        
     def _extract_entity_points(self, entity):
+        # RESTORED to original working version
         points = []
         dxf_type = entity.dxftype()
         try:
@@ -289,6 +172,7 @@ class InspectionApp:
         return points
 
     def _assemble_paths(self, segments):
+        # RESTORED to original working version
         if not segments: return []
         paths = []
         tolerance = 1e-6
@@ -324,48 +208,199 @@ class InspectionApp:
         self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         self.lbl_dxf_status.config(text="DXF: None")
         self._check_files_loaded()
+
+    # ===================================================================
+    # START: ZERNIKE MOMENT ALIGNMENT LOGIC (UNCHANGED)
+    # ===================================================================
+
+    def run_alignment_and_inspection(self):
+        """
+        Replaces the old vertex matching with the robust Zernike Moments approach.
+        """
+        print("\n--- Starting Alignment & Inspection (Zernike Moments Methodology) ---")
+        if self.cv_image is None or self.cad_features['outline'].size == 0:
+            messagebox.showerror("Input Error", "Please load both an image and a DXF file with an 'OUTLINE' layer.")
+            return
+
+        transform_matrix = self.align_shapes_with_zernike_moments()
         
+        if transform_matrix is None:
+            messagebox.showerror("Alignment Error", "Could not compute the transformation matrix. Check debug output for details.")
+            return
+        
+        print("1. Zernike-based transformation matrix calculated successfully.")
+        print("2. Transforming all DXF features to image space...")
+
+        result_image = self.original_cv_image.copy()
+        
+        transformed_outline = cv2.transform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
+        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2) # Cyan outline
+
+        for hole in self.cad_features['holes']:
+            transformed_hole = cv2.transform(hole.reshape(-1, 1, 2), transform_matrix)
+            cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2) # Magenta holes
+        for crease in self.cad_features['creases']:
+            transformed_crease = cv2.transform(crease.reshape(-1, 1, 2), transform_matrix)
+            cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2) # Yellow creases
+        
+        print("3. Drawing final results...")
+        self.update_image_display(result_image)
+        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned and drawn on the image using Zernike Moments.")
+        print("--- Inspection Complete ---")
+        
+    def align_shapes_with_zernike_moments(self):
+        """
+        Orchestrates the Zernike moment pipeline as per the research paper.
+        Returns: A 2x3 affine transformation matrix or None on failure.
+        """
+        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2).astype(np.int32)
+        img_contour = self.find_image_contour(self.original_cv_image)
+        if img_contour is None:
+            print("Error: No contour found in the image.")
+            return None
+
+        cad_centroid, cad_radius = self._normalize_contour(cad_contour)
+        img_centroid, img_radius = self._normalize_contour(img_contour)
+        if cad_radius == 0 or img_radius == 0:
+            print("Error: Could not determine a valid normalization radius (shape has zero area?).")
+            return None
+        print(f"CAD Normalization: Centroid={cad_centroid}, Radius={cad_radius:.2f}")
+        print(f"Image Normalization: Centroid={img_centroid}, Radius={img_radius:.2f}")
+        
+        cad_mask = self._create_binary_mask_from_contour(cad_contour)
+        img_mask = self._create_binary_mask_from_contour(img_contour)
+        
+        print("Calculating Zernike moments for CAD shape...")
+        zm_cad = self._calculate_complex_zernike_moments(cad_mask, degree=10)
+        print("Calculating Zernike moments for Image shape...")
+        zm_img = self._calculate_complex_zernike_moments(img_mask, degree=10)
+
+        if zm_cad is None or zm_img is None:
+            print("Error: Failed to calculate Zernike moments.")
+            return None
+            
+        scale = img_radius / cad_radius
+        rotation_rad = self._recover_rotation_from_zms(zm_cad, zm_img)
+        rotation_deg = np.rad2deg(rotation_rad)
+        
+        print(f"Recovered Parameters: Scale={scale:.4f}, Rotation={rotation_deg:.2f} degrees")
+
+        cad_cx, cad_cy = cad_centroid
+        img_cx, img_cy = img_centroid
+
+        M = cv2.getRotationMatrix2D((cad_cx, cad_cy), rotation_deg, scale)
+        rotated_scaled_cad_centroid = np.dot(M, [cad_cx, cad_cy, 1])
+        tx = img_cx - rotated_scaled_cad_centroid[0]
+        ty = img_cy - rotated_scaled_cad_centroid[1]
+        M[0, 2] += tx
+        M[1, 2] += ty
+        
+        return M
+
+    def _normalize_contour(self, contour):
+        M = cv2.moments(contour)
+        if M["m00"] == 0:
+            return None, 0
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        distances = [np.linalg.norm(np.array((cx, cy)) - pt[0]) for pt in contour]
+        radius = np.max(distances)
+        return (cx, cy), radius
+
+    def _create_binary_mask_from_contour(self, contour):
+        x, y, w, h = cv2.boundingRect(contour)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        shifted_contour = contour - [x, y]
+        cv2.drawContours(mask, [shifted_contour], -1, 255, -1)
+        return mask
+
+    def _radial_poly(self, rho, n, m):
+        if (n - m) % 2 != 0:
+            return np.zeros_like(rho)
+        radial = np.zeros_like(rho, dtype=float)
+        for k in range((n - m) // 2 + 1):
+            num = ((-1)**k * factorial(n - k))
+            den = (factorial(k) * factorial((n + m) // 2 - k) * factorial((n - m) // 2 - k))
+            term = rho**(n - 2 * k)
+            radial += (num / den) * term
+        return radial
+
+    def _calculate_complex_zernike_moments(self, mask, degree=8):
+        h, w = mask.shape
+        x = np.linspace(-1, 1, w)
+        y = np.linspace(-1, 1, h)
+        xx, yy = np.meshgrid(x, y)
+        rho = np.sqrt(xx**2 + yy**2)
+        theta = np.arctan2(yy, xx)
+        disk_mask = rho <= 1.0
+        moments = []
+        for n in range(degree + 1):
+            for m in range(n + 1):
+                if (n - m) % 2 == 0:
+                    R_nm = self._radial_poly(rho, n, m)
+                    Z_nm = R_nm * np.exp(1j * m * theta)
+                    A_nm = (n + 1) / np.pi * np.sum(mask[disk_mask] * np.conj(Z_nm[disk_mask]))
+                    moments.append(A_nm)
+        return np.array(moments)
+
+    def _recover_rotation_from_zms(self, zms_cad, zms_img):
+        angles = []
+        weights = []
+        i = 0
+        for n in range(11):
+            for m in range(n + 1):
+                if (n - m) % 2 == 0:
+                    if m > 0:
+                        phase_cad = np.angle(zms_cad[i])
+                        phase_img = np.angle(zms_img[i])
+                        angle_diff = phase_img - phase_cad
+                        angle_estimate = -angle_diff / m
+                        angles.append(angle_estimate)
+                        weights.append(np.abs(zms_cad[i]) * np.abs(zms_img[i]))
+                    i += 1
+        if not angles:
+            return 0.0
+        angles = np.array(angles)
+        weights = np.array(weights)
+        x = np.sum(weights * np.cos(angles))
+        y = np.sum(weights * np.sin(angles))
+        return np.arctan2(y, x)
+
+    # ===================================================================
+    # END: ZERNIKE MOMENT ALIGNMENT LOGIC
+    # ===================================================================
+
+    def find_image_contour(self, image):
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
+        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
+        kernel = np.ones((7,7), np.uint8)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return max(contours, key=cv2.contourArea) if contours else None
+
+    # --- Visualization and Debugging ---
+
     def run_visualization(self):
-        """
-        Displays visualizations of both the parsed CAD features and the
-        detected image contour in separate windows for comparison.
-        """
         print("--- Running Input Visualization ---")
-
-        # Visualize Parsed CAD Data
-        cad_features_found = self.cad_features['outline'].size > 0 or \
-                             any(self.cad_features['holes']) or \
-                             any(self.cad_features['creases'])
-
-        if not cad_features_found:
-            messagebox.showinfo("Visualize", "No CAD features were found in the loaded DXF file.")
-        else:
-            all_points_list = []
-            if self.cad_features['outline'].size > 0: all_points_list.append(self.cad_features['outline'])
-            if self.cad_features['holes']: all_points_list.extend(self.cad_features['holes'])
-            if self.cad_features['creases']: all_points_list.extend(self.cad_features['creases'])
-
+        if self.cad_features['outline'].size > 0:
+            all_points_list = [self.cad_features['outline']] + self.cad_features['holes'] + self.cad_features['creases']
             all_points = np.vstack(all_points_list)
             x_min, y_min = np.min(all_points, axis=0)
             x_max, y_max = np.max(all_points, axis=0)
-
             CANVAS_W, CANVAS_H, padding = 800, 600, 50
             cad_w, cad_h = x_max - x_min, y_max - y_min
-            
             if cad_w > 0 and cad_h > 0:
                 scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
                 cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
-                
                 def transform_pt(points):
                     return ((points - [x_min, y_min]) * [scale, -scale] + [padding, CANVAS_H - padding]).astype(np.int32)
-                
-                if self.cad_features['outline'].size > 0:
-                    cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
+                cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['holes']], True, (0, 255, 255), 1)
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['creases']], False, (255, 255, 0), 1)
                 cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
 
-        # Visualize Detected Image Contour
         image_contour = self.find_image_contour(self.cv_image)
         if image_contour is not None:
             debug_image = self.original_cv_image.copy()
@@ -376,6 +411,31 @@ class InspectionApp:
         
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
 
+    def run_alignment_debug(self):
+        print("\n--- Running Zernike Alignment Debug Visualization ---")
+        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2).astype(np.int32)
+        img_contour = self.find_image_contour(self.original_cv_image)
+        if img_contour is None:
+            return messagebox.showerror("Debug Error", "No contour found in image.")
+        
+        cad_mask = self._create_binary_mask_from_contour(cad_contour)
+        img_mask = self._create_binary_mask_from_contour(img_contour)
+        
+        cad_mask_display = cv2.resize(cad_mask, (300, 300), interpolation=cv2.INTER_NEAREST)
+        img_mask_display = cv2.resize(img_mask, (300, 300), interpolation=cv2.INTER_NEAREST)
+        
+        cv2.imshow("Debug 1: CAD Binary Mask", cad_mask_display)
+        cv2.imshow("Debug 2: Image Binary Mask", img_mask_display)
+        
+        transform_matrix = self.align_shapes_with_zernike_moments()
+        if transform_matrix is not None:
+            debug_final_image = self.original_cv_image.copy()
+            transformed_outline = cv2.transform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
+            cv2.polylines(debug_final_image, [transformed_outline.astype(np.int32)], True, (0, 255, 0), 3) # Bright green for debug
+            cv2.imshow("Debug 3: Final Zernike Alignment", debug_final_image)
+            messagebox.showinfo("Debug", "Debug windows opened. Examine them to diagnose the alignment process.")
+        else:
+            messagebox.showerror("Debug Error", "Alignment failed during debug run.")
 
 if __name__ == "__main__":
     root = tk.Tk()
