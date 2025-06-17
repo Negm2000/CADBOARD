@@ -9,6 +9,25 @@ import os
 import traceback
 from scipy.special import factorial
 
+# Import the library for IDS cameras
+# This library needs to be installed, e.g., via 'pip install pyueye'
+try:
+    from pyueye import ueye
+except ImportError:
+    # Create a mock ueye object if the library is not installed
+    # This allows the GUI to run for development without a camera connected
+    print("WARNING: pyueye library not found. IDS Camera functionality will be disabled.")
+    class MockUeye:
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                print(f"MOCK UEYE: Call to {name} with args={args} kwargs={kwargs}")
+                if name == 'is_InitCamera':
+                    return -1 # Simulate camera not found
+                return 0
+            return method
+    ueye = MockUeye()
+
+
 class InspectionApp:
     
     def __init__(self, root):
@@ -42,11 +61,15 @@ class InspectionApp:
         self.image_frame.pack(fill=tk.BOTH, expand=True)
 
         # --- Control Widgets ---
-        self.btn_load_image = ttk.Button(control_frame, text="1. Load Image", command=self.load_image)
+        self.btn_load_image = ttk.Button(control_frame, text="1a. Load Image File", command=self.load_image)
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
 
+        # --- NEW WIDGET: Button to capture from IDS camera ---
+        self.btn_capture_ids = ttk.Button(control_frame, text="1b. Capture from IDS", command=self.capture_from_ids)
+        self.btn_capture_ids.pack(side=tk.LEFT, padx=5)
+
         self.btn_load_dxf = ttk.Button(control_frame, text="2. Load DXF", command=self.load_dxf)
-        self.btn_load_dxf.pack(side=tk.LEFT, padx=5)
+        self.btn_load_dxf.pack(side=tk.LEFT, padx=(15,5))
         
         self.btn_visualize = ttk.Button(control_frame, text="Visualize Inputs", state=tk.DISABLED, command=self.run_visualization)
         self.btn_visualize.pack(side=tk.LEFT, padx=(20, 5))
@@ -78,6 +101,78 @@ class InspectionApp:
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
 
+    # --- UPDATED METHOD: Handles the entire camera capture process ---
+    def capture_from_ids(self):
+        """Initializes, captures, and closes an IDS camera."""
+        h_cam = ueye.HIDS(0) # 0 = First available camera
+        mem_ptr = ueye.c_mem_p()
+        mem_id = ueye.int()
+
+        try:
+            # 1. Initialize Camera
+            ret = ueye.is_InitCamera(h_cam, None)
+            if ret != ueye.IS_SUCCESS:
+                messagebox.showerror("IDS Camera Error", f"Could not initialize camera. Error code: {ret}")
+                return
+
+            # 2. Get sensor info to determine image size
+            sensor_info = ueye.SENSORINFO()
+            ueye.is_GetSensorInfo(h_cam, sensor_info)
+            width = int(sensor_info.nMaxWidth)
+            height = int(sensor_info.nMaxHeight)
+            
+            # *** FIX 1: Set bits per pixel to 24 for color ***
+            bits_per_pixel = 24
+
+            # *** FIX 2: Set color mode to BGR8_PACKED for 24-bit color ***
+            ret = ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
+            if ret != ueye.IS_SUCCESS:
+                 messagebox.showerror("IDS Camera Error", f"Could not set color mode. Is camera color?")
+                 return
+
+            # 4. Allocate memory for the image
+            ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
+            
+            # 5. Set this memory as the active buffer
+            ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
+
+            # 6. Capture a single image ("Freeze Video")
+            print("Capturing image from IDS camera...")
+            ret = ueye.is_FreezeVideo(h_cam, ueye.IS_WAIT)
+            if ret != ueye.IS_SUCCESS:
+                messagebox.showerror("IDS Camera Error", "Could not capture image from camera.")
+                return
+
+            # 7. Access the image data from the buffer
+            array = ueye.get_data(mem_ptr, width, height, bits_per_pixel, width * bits_per_pixel // 8, copy=True)
+            
+            # *** FIX 3: Reshape the array for 3 color channels (height, width, 3) ***
+            frame_bgr = np.reshape(array, (height, width, 3))
+            
+            # Note: No cvtColor is needed as the data is already in BGR format
+
+            # 8. Update the application's state with the new image
+            self.original_cv_image = frame_bgr
+            self.cv_image = self.original_cv_image.copy()
+            self.lbl_image_status.config(text="Image: From IDS Camera")
+            self.image_path = "IDS_Capture" # A placeholder to satisfy logic checks
+            
+            self.update_image_display(self.cv_image)
+            self._check_files_loaded()
+            
+            messagebox.showinfo("Success", "Image captured successfully from IDS camera.")
+
+        except Exception as e:
+            error_details = traceback.format_exc()
+            messagebox.showerror("IDS Camera Error", f"An unexpected error occurred: {e}\n\n{error_details}\n\n- Is the pyueye library installed?\n- Is the camera connected?\n- Are the IDS drivers installed?")
+        finally:
+            # 9. Clean up: Free memory and exit the camera handle
+            if mem_ptr:
+                ueye.is_FreeImageMem(h_cam, mem_ptr, mem_id)
+            if h_cam:
+                ueye.is_ExitCamera(h_cam)
+            print("IDS Camera resources released.")
+
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return
@@ -94,7 +189,6 @@ class InspectionApp:
             self.reset_image_state()
 
     def load_dxf(self):
-        # RESTORED to original working version
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
         if not filepath: return
         self.dxf_path = filepath
@@ -156,7 +250,6 @@ class InspectionApp:
         self.image_label.config(image=self.tk_image)
         
     def _extract_entity_points(self, entity):
-        # RESTORED to original working version
         points = []
         dxf_type = entity.dxftype()
         try:
@@ -172,7 +265,6 @@ class InspectionApp:
         return points
 
     def _assemble_paths(self, segments):
-        # RESTORED to original working version
         if not segments: return []
         paths = []
         tolerance = 1e-6
@@ -371,6 +463,7 @@ class InspectionApp:
     # ===================================================================
 
     def find_image_contour(self, image):
+        if image is None: return None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
@@ -401,13 +494,14 @@ class InspectionApp:
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['creases']], False, (255, 255, 0), 1)
                 cv2.imshow("DEBUG: Parsed CAD", cad_canvas)
 
-        image_contour = self.find_image_contour(self.cv_image)
-        if image_contour is not None:
-            debug_image = self.original_cv_image.copy()
-            cv2.drawContours(debug_image, [image_contour.astype(np.int32)], -1, (255, 0, 255), 3)
-            cv2.imshow("DEBUG: Detected Image Contour", debug_image)
-        else:
-            messagebox.showinfo("Visualize", "No contour detected in image with current HSV settings.")
+        if self.cv_image is not None:
+            image_contour = self.find_image_contour(self.cv_image)
+            if image_contour is not None:
+                debug_image = self.original_cv_image.copy()
+                cv2.drawContours(debug_image, [image_contour.astype(np.int32)], -1, (255, 0, 255), 3)
+                cv2.imshow("DEBUG: Detected Image Contour", debug_image)
+            else:
+                messagebox.showinfo("Visualize", "No contour detected in image with current HSV settings.")
         
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
 
