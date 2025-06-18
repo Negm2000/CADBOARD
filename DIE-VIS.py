@@ -345,7 +345,7 @@ class InspectionApp:
         Orchestrates the Zernike moment pipeline as per the research paper.
         Returns: A 2x3 affine transformation matrix or None on failure.
         """
-        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2).astype(np.int32)
+        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2)
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
             print("Error: No contour found in the image.")
@@ -399,11 +399,52 @@ class InspectionApp:
         radius = np.max(distances)
         return (cx, cy), radius
 
-    def _create_binary_mask_from_contour(self, contour):
-        x, y, w, h = cv2.boundingRect(contour)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        shifted_contour = contour - [x, y]
-        cv2.drawContours(mask, [shifted_contour], -1, 255, -1)
+    def _create_binary_mask_from_contour(self, contour, canvas_size=(512, 512)):
+        """
+        Creates a binary mask of a standardized size from a contour.
+        This version correctly handles high-precision floating-point contours by
+        performing all scaling calculations before the final conversion to integers,
+        preserving the shape's detail.
+        """
+        # If the contour is empty, return a blank canvas.
+        if contour.size == 0:
+            return np.zeros(canvas_size, dtype=np.uint8)
+
+        # 1. Manually calculate the bounding box from the float contour.
+        #    This avoids using cv2.boundingRect which requires integer input.
+        x_coords = contour[:, 0, 0]
+        y_coords = contour[:, 0, 1]
+        x_min, y_min = np.min(x_coords), np.min(y_coords)
+        x_max, y_max = np.max(x_coords), np.max(y_coords)
+        w, h = x_max - x_min, y_max - y_min
+
+        if w == 0 or h == 0:
+            return np.zeros(canvas_size, dtype=np.uint8)
+
+        # 2. Determine scaling factor using floating-point dimensions.
+        padding = 20
+        canvas_w, canvas_h = canvas_size
+        scale = min((canvas_w - 2 * padding) / w, (canvas_h - 2 * padding) / h)
+
+        # 3. Calculate new dimensions and offsets with high precision.
+        new_w, new_h = w * scale, h * scale
+        offset_x = (canvas_w - new_w) / 2
+        offset_y = (canvas_h - new_h) / 2
+
+        # 4. Perform all transformations using floating-point arithmetic.
+        #    Shift the original contour's origin to its top-left corner.
+        shifted_contour = contour - [x_min, y_min]
+        # Scale the contour up and translate it to the center of the canvas.
+        transformed_contour = (shifted_contour * scale) + [offset_x, offset_y]
+
+        # 5. THE CRITICAL STEP: Convert to integers ONLY AFTER all scaling and
+        #    translation operations are complete.
+        final_contour = transformed_contour.astype(np.int32)
+
+        # 6. Create the final mask and draw the high-fidelity contour.
+        mask = np.zeros(canvas_size, dtype=np.uint8)
+        cv2.drawContours(mask, [final_contour], -1, 255, cv2.FILLED)
+    
         return mask
 
     def _radial_poly(self, rho, n, m):
@@ -467,9 +508,6 @@ class InspectionApp:
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        kernel = np.ones((7,7), np.uint8)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
         contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return max(contours, key=cv2.contourArea) if contours else None
 
@@ -507,7 +545,7 @@ class InspectionApp:
 
     def run_alignment_debug(self):
         print("\n--- Running Zernike Alignment Debug Visualization ---")
-        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2).astype(np.int32)
+        cad_contour = self.cad_features['outline'].reshape(-1, 1, 2)
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
             return messagebox.showerror("Debug Error", "No contour found in image.")
