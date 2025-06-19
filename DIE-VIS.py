@@ -31,7 +31,7 @@ class InspectionApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Pipeline Engine)")
+        self.root.title("DIE-VIS: Visualizer & Inspector (Moments+ICP Pipeline Engine)")
         self.root.geometry("1200x850")
 
         # --- State Variables ---
@@ -268,149 +268,229 @@ class InspectionApp:
         self.lbl_dxf_status.config(text="DXF: None")
         self._check_files_loaded()
 
-    # --- CORE ALIGNMENT LOGIC (NOW USING HOMOGRAPHY) ---
+    # --- CORE ALIGNMENT LOGIC (MOMENTS+ICP PIPELINE) ---
     
     def run_alignment_and_inspection(self):
-        print("\n--- Starting Alignment & Inspection (Homography Pipeline) ---")
+        print("\n--- Starting Alignment & Inspection (Moments+ICP Pipeline) ---")
         if self.cv_image is None or self.cad_features['outline'].size == 0:
             messagebox.showerror("Input Error", "Please load both an image and a DXF file with an 'OUTLINE' layer.")
             return
 
-        # The pipeline now returns a 3x3 homography matrix
-        transform_matrix = self.align_with_homography_pipeline()
+        # The new pipeline returns a 2x3 rigid transformation matrix
+        transform_matrix = self.align_with_moments_icp_pipeline()
         
         if transform_matrix is None:
             messagebox.showerror("Alignment Error", "Could not compute the transformation matrix. Check console for details.")
             return
         
-        print("4. Final homography matrix calculated successfully.")
-        print("5. Transforming all DXF features to image space and drawing results...")
+        print("5. Final transformation matrix calculated successfully.")
+        print("6. Transforming all DXF features to image space and drawing results...")
 
         result_image = self.original_cv_image.copy()
         
-        # Use cv2.perspectiveTransform for homography. It needs the input points to have an extra dimension.
-        def apply_homography(points, M):
-            # Reshape points to (1, N, 2)
-            points_reshaped = points.reshape(1, -1, 2)
-            transformed_points = cv2.perspectiveTransform(points_reshaped, M)
-            # Reshape back to (N, 1, 2) for polylines
-            return transformed_points.reshape(-1, 1, 2)
+        def apply_rigid_transform(points, M):
+            # cv2.transform requires shape (N, 1, 2) or (1, N, 2)
+            points_reshaped = points.reshape(-1, 1, 2)
+            transformed_points = cv2.transform(points_reshaped, M)
+            return transformed_points
 
-        transformed_outline = apply_homography(self.cad_features['outline'], transform_matrix)
+        transformed_outline = apply_rigid_transform(self.cad_features['outline'], transform_matrix)
         cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
 
         for hole in self.cad_features['holes']:
-            transformed_hole = apply_homography(hole, transform_matrix)
+            transformed_hole = apply_rigid_transform(hole, transform_matrix)
             cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
         for crease in self.cad_features['creases']:
-            transformed_crease = apply_homography(crease, transform_matrix)
+            transformed_crease = apply_rigid_transform(crease, transform_matrix)
             cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
         
         self.update_image_display(result_image)
-        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned using a Homography model.")
+        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned using the Moments+ICP pipeline.")
         print("--- Inspection Complete ---")
 
-    def align_with_homography_pipeline(self):
-        """Orchestrates a 2-stage feature matching and homography fitting pipeline."""
-        image_mask, img_contour = self.find_image_contour_and_mask(self.original_cv_image)
+    def align_with_moments_icp_pipeline(self):
+        """Orchestrates the Moments+ICP registration pipeline."""
+        # --- Stage 0: Preprocessing ---
+        print("1. Preprocessing: Extracting and preparing contours...")
+        img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
-            print("Error: No contour found in the image.")
+            print("   Error: No contour found in the image.")
             return None
         
-        # --- STAGE 1: Feature Extraction (ORB Descriptors) ---
-        print("1. Creating high-fidelity binary mask for CAD (with holes)...")
-        cad_mask, cad_offset = self._create_mask_from_cad_features()
-        print("2. Extracting ORB features from CAD mask and Image mask...")
-        orb = cv2.ORB_create(nfeatures=2000) # Increased features for more robustness
-        kp_cad, des_cad = orb.detectAndCompute(cad_mask, None)
-        kp_img, des_img = orb.detectAndCompute(image_mask, None)
+        cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         
-        if des_cad is None or des_img is None or len(kp_cad) < 10 or len(kp_img) < 10:
-             print("Error: Not enough features detected on CAD or image to proceed.")
+        # --- Stage 1: Coarse Global Alignment (Moments) ---
+        print("2. Coarse Alignment: Using Shape Moments to find initial pose...")
+        coarse_transform = self._align_with_moments(cad_contour, img_contour)
+        if coarse_transform is None:
+             print("   Error: Coarse alignment with Moments failed.")
              return None
-        print(f"   Found {len(kp_cad)} CAD features and {len(kp_img)} image features.")
+        print("3. Coarse alignment successful.")
 
-        # --- STAGE 2: Feature Matching & Homography Calculation ---
-        print("3. Matching features and calculating Homography with RANSAC...")
-        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = matcher.match(des_cad, des_img)
-        matches = sorted(matches, key=lambda x: x.distance)
+        # --- Stage 2: Fine Iterative Refinement (Iterative Closest Point) ---
+        print("4. Fine Refinement: Using ICP to finalize alignment...")
+        # We can use resampled contours here for speed if desired, but using original
+        # contours provides higher precision for the final fit.
+        final_transform = self._iterative_closest_point(
+            source_points=cad_contour,
+            target_points=img_contour,
+            initial_matrix=coarse_transform
+        )
+
+        return final_transform
+
+    def _resample_contour(self, contour, num_points):
+        """
+        Resamples a contour to have a specific number of uniformly spaced points.
+        This version uses interpolation for robustness.
+        """
+        contour = contour.reshape(-1, 2).astype(np.float32)
         
-        if len(matches) < 4: # Homography needs at least 4 points
-            print("Error: Not enough good matches found to compute a reliable transform.")
+        # Calculate the cumulative arc length along the contour, ensuring no negative inputs to sqrt
+        distances = np.cumsum(np.sqrt(np.maximum(0, np.sum(np.diff(contour, axis=0, append=contour[0:1])**2, axis=1))))
+        arc_length = distances[-1]
+        
+        # Handle degenerate case where contour has no length
+        if arc_length == 0:
+            return np.array([contour[0]] * num_points, dtype=np.float32)
+            
+        # Create the new, evenly spaced distances
+        fx = distances / arc_length
+        fy = np.linspace(0, 1, num_points)
+        
+        # Interpolate the x and y coordinates
+        x_new = np.interp(fy, fx, contour[:, 0])
+        y_new = np.interp(fy, fx, contour[:, 1])
+        
+        return np.array([x_new, y_new]).T.astype(np.float32)
+
+    def _align_with_moments(self, cad_contour, img_contour):
+        """
+        Estimates a coarse transformation using shape moments.
+        Calculates translation, scale, and rotation.
+        """
+        try:
+            # --- Calculate moments for both contours ---
+            M_cad = cv2.moments(cad_contour)
+            M_img = cv2.moments(img_contour)
+            
+            if M_cad["m00"] == 0 or M_img["m00"] == 0:
+                print("   Error: Contour with zero area found.")
+                return None
+            
+            # --- 1. Calculate Centroids for Translation ---
+            cad_cx = M_cad["m10"] / M_cad["m00"]
+            cad_cy = M_cad["m01"] / M_cad["m00"]
+            img_cx = M_img["m10"] / M_img["m00"]
+            img_cy = M_img["m01"] / M_img["m00"]
+
+            # --- 2. Calculate Scale from contour areas ---
+            scale = math.sqrt(M_img["m00"] / M_cad["m00"])
+            
+            # --- 3. Calculate Rotation from orientation ---
+            # This uses central moments to find the orientation angle of the shape's principal axis.
+            # Note: This can be ambiguous by 180 degrees and unstable for symmetric shapes.
+            def get_orientation(M):
+                mu11 = M['mu11']
+                mu20 = M['mu20']
+                mu02 = M['mu02']
+                return 0.5 * math.atan2(2 * mu11, mu20 - mu02)
+
+            angle_cad = get_orientation(M_cad)
+            angle_img = get_orientation(M_img)
+            rotation_angle_rad = angle_img - angle_cad
+
+            # --- 4. Build the 2x3 Affine Transformation Matrix ---
+            cos_a = math.cos(rotation_angle_rad)
+            sin_a = math.sin(rotation_angle_rad)
+
+            # Create the matrix in steps:
+            # 1. Center CAD contour at origin: (x - cad_cx)
+            # 2. Scale and rotate: s * R * (x - cad_cx)
+            # 3. Translate to image centroid: s * R * (x - cad_cx) + img_c
+            # This expands to: (s*R*x) - (s*R*cad_c) + img_c
+            # The matrix part is [s*R], the translation part is [img_c - s*R*cad_c]
+            
+            tx = img_cx - (scale * (cad_cx * cos_a - cad_cy * sin_a))
+            ty = img_cy - (scale * (cad_cx * sin_a + cad_cy * cos_a))
+
+            transform = np.array([
+                [scale * cos_a, -scale * sin_a, tx],
+                [scale * sin_a,  scale * cos_a, ty]
+            ], dtype=np.float32)
+
+            return transform
+        except Exception as e:
+            print(f"   Error during moments-based alignment: {e}")
             return None
 
-        good_matches = matches[:100] # Use more matches for a stable result
-        print(f"   Using {len(good_matches)} best matches for estimation.")
+    def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
+        """
+        Custom implementation of the Iterative Closest Point algorithm.
+        Refines the alignment of source_points to target_points.
+        """
+        source_pts = source_points.reshape(-1, 2)
+        target_pts = target_points.reshape(-1, 2)
 
-        cad_pts_mask_space = np.float32([kp_cad[m.queryIdx].pt for m in good_matches])
-        img_pts = np.float32([kp_img[m.trainIdx].pt for m in good_matches])
-
-        # Convert CAD points from MASK space back to ORIGINAL DXF space
-        cad_pts_orig_space = cad_pts_mask_space + cad_offset
-
-        # Use findHomography, the correct model for perspective distortion
-        homography_matrix, _ = cv2.findHomography(
-            cad_pts_orig_space, img_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0
-        )
+        target_kdtree = KDTree(target_pts)
         
-        # The ICP step is removed as it's based on a different, simpler geometric model.
-        # The homography is the final, most accurate transformation.
-        return homography_matrix
-
-    def _create_mask_from_cad_features(self, padding=50):
-        """Creates a high-fidelity binary mask from all CAD features (outline and holes)."""
-        if self.cad_features['outline'].size == 0: return None, None
+        current_transform = initial_matrix.copy()
         
-        all_points_list = [self.cad_features['outline'].reshape(-1, 2)]
-        if self.cad_features['holes']:
-            all_points_list += [h.reshape(-1, 2) for h in self.cad_features['holes']]
+        prev_error = float('inf')
+
+        for i in range(max_iterations):
+            source_transformed = cv2.transform(source_pts.reshape(-1, 1, 2), current_transform).reshape(-1, 2)
             
-        all_points_stacked = np.vstack(all_points_list)
-        x_min, y_min = np.min(all_points_stacked, axis=0)
-        x_max, y_max = np.max(all_points_stacked, axis=0)
+            distances, indices = target_kdtree.query(source_transformed)
+            correspondences = target_pts[indices]
+            
+            # Use LMEDS for robustness against some outlier correspondences
+            new_transform, _ = cv2.estimateAffine2D(source_pts, correspondences, method=cv2.LMEDS)
 
-        w, h = int(x_max - x_min), int(y_max - y_min)
-        mask = np.zeros((h + 2 * padding, w + 2 * padding), dtype=np.uint8)
-        
-        offset = np.array([x_min - padding, y_min - padding])
+            if new_transform is None:
+                print("   ICP Warning: Could not estimate transform in iteration. Using previous.")
+                break # Exit if estimation fails
 
-        shifted_outline = self.cad_features['outline'].reshape(-1, 2) - offset
-        cv2.drawContours(mask, [shifted_outline.astype(np.int32)], -1, 255, cv2.FILLED)
+            current_transform = new_transform
+            
+            mean_error = np.mean(distances**2)
+            if abs(prev_error - mean_error) < tolerance:
+                print(f"   ICP converged in {i+1} iterations. Final MSE: {mean_error:.4f}")
+                break
+            prev_error = mean_error
+        else:
+             print(f"   ICP reached max iterations. Final MSE: {prev_error:.4f}")
 
-        for hole_contour in self.cad_features['holes']:
-            shifted_hole = hole_contour.reshape(-1, 2) - offset
-            cv2.drawContours(mask, [shifted_hole.astype(np.int32)], -1, 0, cv2.FILLED)
+        return current_transform
 
-        return mask, offset
-
-    def find_image_contour_and_mask(self, image):
-        """Finds the largest contour and returns a high-fidelity mask and the contour."""
-        if image is None: return None, None
+    def find_image_contour(self, image):
+        """Finds the largest contour in the image using HSV color masking."""
+        if image is None: return None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # These values may need tuning for different lighting/object colors
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
         
         kernel = np.ones((5,5),np.uint8)
         mask_cleaned = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
         
-        final_mask = np.zeros_like(mask_cleaned)
         contours, hierarchy = cv2.findContours(mask_cleaned, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
-            return mask_cleaned, None
+            return None
         
-        largest_contour = max(contours, key=cv2.contourArea)
-        
+        largest_area = 0
+        largest_contour = None
         for i, contour in enumerate(contours):
-            if hierarchy[0][i][3] == -1: # Outer contour
-                cv2.drawContours(final_mask, [contour], -1, 255, cv2.FILLED)
-            else: # Hole
-                cv2.drawContours(final_mask, [contour], -1, 0, cv2.FILLED)
+            if hierarchy[0][i][3] == -1: # It's an outer contour
+                area = cv2.contourArea(contour)
+                if area > largest_area:
+                    largest_area = area
+                    largest_contour = contour
+        
+        return largest_contour.astype(np.float32) if largest_contour is not None else None
 
-        return final_mask, largest_contour
-
-    # --- VISUALIZATION AND DEBUGGING (MODIFIED FOR SCALING) ---
+    # --- VISUALIZATION AND DEBUGGING ---
 
     def _resize_for_display(self, window_name, image, max_dim=900):
         """Resizes an image to a maximum dimension for display while preserving aspect ratio."""
@@ -443,7 +523,7 @@ class InspectionApp:
                 self._resize_for_display("DEBUG: Parsed CAD", cad_canvas)
 
         if self.cv_image is not None:
-            _, image_contour = self.find_image_contour_and_mask(self.cv_image)
+            image_contour = self.find_image_contour(self.cv_image)
             if image_contour is not None:
                 debug_image = self.original_cv_image.copy()
                 cv2.drawContours(debug_image, [image_contour.astype(np.int32)], -1, (255, 0, 255), 3)
@@ -454,49 +534,41 @@ class InspectionApp:
         messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
 
     def run_alignment_debug(self):
-        """Overhauled debug function to visualize the new Homography-based pipeline."""
-        print("\n--- Running Homography Pipeline Debug Visualization ---")
+        """Debug function to visualize the new Moments+ICP pipeline."""
+        print("\n--- Running Moments+ICP Pipeline Debug Visualization ---")
         
-        image_mask, img_contour = self.find_image_contour_and_mask(self.original_cv_image)
+        # --- Stage 0: Inputs ---
+        img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None: return messagebox.showerror("Debug Error", "No contour found in image.")
+        cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         
-        cad_mask, cad_offset = self._create_mask_from_cad_features()
-        if cad_mask is None: return messagebox.showerror("Debug Error", "Could not create CAD mask.")
+        debug_img_inputs = self.original_cv_image.copy()
+        cv2.drawContours(debug_img_inputs, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2, lineType=cv2.LINE_AA)
+        self._resize_for_display("Debug 0: Detected Image Contour", debug_img_inputs)
+        
+        # --- Stage 1: Coarse Alignment ---
+        coarse_transform = self._align_with_moments(cad_contour, img_contour)
+        
+        if coarse_transform is None:
+            return messagebox.showerror("Debug Error", "Coarse alignment (Moments) step failed.")
 
-        orb = cv2.ORB_create(nfeatures=2000)
-        kp_cad, des_cad = orb.detectAndCompute(cad_mask, None)
-        kp_img, des_img = orb.detectAndCompute(image_mask, None)
+        debug_img_coarse = self.original_cv_image.copy()
+        cv2.drawContours(debug_img_coarse, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2)
+        coarsely_aligned_cad = cv2.transform(cad_contour.reshape(-1, 1, 2), coarse_transform)
+        cv2.polylines(debug_img_coarse, [coarsely_aligned_cad.astype(np.int32)], True, (0, 255, 255), 2)
+        self._resize_for_display("Debug 1: Coarse (Moments) Alignment", debug_img_coarse)
 
-        if des_cad is None or des_img is None: return messagebox.showerror("Debug Error", "Feature detection failed.")
+        # --- Stage 2: Fine Alignment ---
+        final_transform = self._iterative_closest_point(cad_contour, img_contour, coarse_transform)
+        if final_transform is None:
+            return messagebox.showerror("Debug Error", "Fine alignment (ICP) step failed.")
 
-        # --- Debug 1: Feature Matches ---
-        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = sorted(matcher.match(des_cad, des_img), key=lambda x: x.distance)
-        
-        debug_matches_img = cv2.drawMatches(cad_mask, kp_cad, image_mask, kp_img, matches[:25], None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-        self._resize_for_display("Debug 1: Top Feature Matches", debug_matches_img)
-        
-        if len(matches) < 4: return messagebox.showerror("Debug Error", "Not enough matches to proceed.")
-        
-        good_matches = matches[:100]
-        cad_pts_mask_space = np.float32([kp_cad[m.queryIdx].pt for m in good_matches])
-        img_pts = np.float32([kp_img[m.trainIdx].pt for m in good_matches])
-        cad_pts_orig_space = cad_pts_mask_space + cad_offset
+        debug_img_final = self.original_cv_image.copy()
+        cv2.drawContours(debug_img_final, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2)
+        final_aligned_cad = cv2.transform(cad_contour.reshape(-1, 1, 2), final_transform)
+        cv2.polylines(debug_img_final, [final_aligned_cad.astype(np.int32)], True, (0, 255, 0), 2) # Green for final
+        self._resize_for_display("Debug 2: Final (ICP) Alignment", debug_img_final)
 
-        # --- Debug 2: Final Homography Alignment ---
-        final_transform, _ = cv2.findHomography(cad_pts_orig_space, img_pts, method=cv2.RANSAC)
-        
-        if final_transform is not None:
-            debug_img_2 = self.original_cv_image.copy()
-            
-            points_reshaped = self.cad_features['outline'].reshape(1, -1, 2)
-            transformed_outline = cv2.perspectiveTransform(points_reshaped, final_transform)
-            
-            cv2.polylines(debug_img_2, [transformed_outline.reshape(-1, 1, 2).astype(np.int32)], True, (0, 255, 0), 2)
-            self._resize_for_display("Debug 2: Final Homography Alignment", debug_img_2)
-        else:
-            return messagebox.showinfo("Debug Info", "Homography alignment failed.")
-        
         messagebox.showinfo("Debug", "Debug windows opened. Examine the stages of alignment.")
 
 
