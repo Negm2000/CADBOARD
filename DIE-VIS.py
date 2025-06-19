@@ -97,8 +97,8 @@ class InspectionApp:
         style.theme_use('clam')
         style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'), borderwidth=0)
         style.map("TButton", 
-                    background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')],
-                    foreground=[('disabled', '#888888')])
+                  background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')],
+                  foreground=[('disabled', '#888888')])
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
 
@@ -238,7 +238,7 @@ class InspectionApp:
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
                 points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
         except Exception as e:
-            print(f"      Warning: Could not process entity {dxf_type}: {e}")
+            print(f"         Warning: Could not process entity {dxf_type}: {e}")
         return points
 
     def _assemble_paths(self, segments):
@@ -333,8 +333,8 @@ class InspectionApp:
         
         coarse_transform_1 = self._align_with_moments(cad_contour_yflipped, img_contour)
         if coarse_transform_1 is None:
-             print("   Error: Coarse alignment failed on Pass 1.")
-             return None
+              print("   Error: Coarse alignment failed on Pass 1.")
+              return None
         
         final_transform_1, final_mse_1 = self._iterative_closest_point(
             source_points=cad_contour_yflipped,
@@ -374,7 +374,7 @@ class InspectionApp:
             return final_transform_2
 
     def run_homography_inspection(self):
-        print("\n--- Starting Alignment & Inspection (Hybrid Geometric Homography) ---")
+        print("\n--- Starting Alignment & Inspection (Iterative Refinement Homography) ---")
         if self.cv_image is None or self.cad_features['outline'].size == 0:
             messagebox.showerror("Input Error", "Please load both an image and a DXF file.")
             return
@@ -392,7 +392,8 @@ class InspectionApp:
 
         def apply_perspective_transform(points, H):
             if points.size == 0: return np.array([])
-            points_reshaped = points.reshape(-1, 1, 2)
+            # Ensure points are float32 for perspectiveTransform
+            points_reshaped = points.astype(np.float32).reshape(-1, 1, 2)
             transformed_points = cv2.perspectiveTransform(points_reshaped, H)
             return transformed_points
 
@@ -407,22 +408,29 @@ class InspectionApp:
             cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
         
         self.update_image_display(result_image)
-        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned using the Hybrid Geometric Homography pipeline.")
+        messagebox.showinfo("Inspection Complete", "DXF features have been aligned using the Iterative Refinement Homography pipeline.")
         print("--- Inspection Complete ---")
 
+    # ==============================================================================
+    # === REPLACED FUNCTION: Iterative Refinement Homography                     ===
+    # ==============================================================================
     def align_with_homography_pipeline(self):
-        """Aligns by matching geometric corners after an initial robust affine alignment."""
-        print("--- Starting Hybrid Geometric Homography Pipeline ---")
+        """
+        Calculates a highly robust homography through iterative refinement.
+        This method self-corrects for poor initial alignments caused by severe perspective.
+        """
+        print("--- Starting Iterative Refinement Homography Pipeline ---")
 
-        # 1. Get a robust baseline affine transform
+        # 1. Get a ROBUST baseline affine transform. This is a critical first step
+        #    to handle the major scale, rotation, and Y-flip issues.
         print("1. Calculating baseline affine transformation...")
         M_affine = self.align_with_moments_icp_pipeline()
         if M_affine is None:
-            print("   Error: Baseline affine alignment failed.")
+            print("   Error: Baseline affine alignment failed. Cannot proceed.")
             return None
 
-        # 2. Extract geometric corners from both CAD and image
-        print("2. Extracting geometric corners from CAD and image...")
+        # 2. Extract prominent geometric corners from both CAD and image.
+        print("2. Extracting prominent geometric corners...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
             print("   Error: No contour found in image for corner detection.")
@@ -430,70 +438,95 @@ class InspectionApp:
             
         cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
 
-        # Use the consistent approxPolyDP method for both
-        image_corners = self._extract_corners(img_contour)
-        cad_corners = self._extract_corners(cad_contour_original) 
+        # Use an aggressive epsilon to find only the most significant corners.
+        image_corners = self._extract_corners(img_contour, epsilon_factor=0.015)
+        cad_corners = self._extract_corners(cad_contour_original, epsilon_factor=0.015)
 
-        if image_corners is None or cad_corners is None:
-            print("   Error: Corner detection failed on image or CAD contour.")
+        if image_corners is None or cad_corners is None or len(image_corners) < 4 or len(cad_corners) < 4:
+            print(f"   Error: Insufficient corners. CAD: {len(cad_corners) if cad_corners is not None else 0}, Img: {len(image_corners) if image_corners is not None else 0}")
             return None
-            
         print(f"   Found {len(cad_corners)} CAD corners and {len(image_corners)} image corners.")
-
-        # 3. Intelligent Matching based on the baseline affine transform
-        print("3. Matching corners using affine pre-alignment...")
-        cad_corners_transformed = cv2.transform(cad_corners.reshape(-1, 1, 2), M_affine).reshape(-1, 2)
-
-        if len(image_corners) == 0:
-            print("   Error: No corners found in image to match.")
-            return None
+        
+        # 3. Iterative Refinement Loop
+        print("3. Starting iterative homography refinement...")
+        
+        # Initial transformation is the robust affine matrix.
+        # We need to convert it to a 3x3 matrix for perspective transforms.
+        current_H = np.vstack([M_affine, [0, 0, 1]])
         image_corner_kdtree = KDTree(image_corners)
         
-        distances, indices = image_corner_kdtree.query(cad_corners_transformed)
+        NUM_ITERATIONS = 5
+        for i in range(NUM_ITERATIONS):
+            print(f"   Iteration {i+1}/{NUM_ITERATIONS}:")
+            
+            # A. Transform CAD corners with the *current* homography.
+            # Use original cad_corners each time. The transform is what improves.
+            cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
+            
+            # B. Re-match points: Find the new closest image corner for each transformed CAD corner.
+            distances, indices = image_corner_kdtree.query(cad_corners_transformed)
+            
+            # C. Create point pairs for the next calculation. RANSAC will handle outliers.
+            src_pts = cad_corners
+            dst_pts = image_corners[indices]
+            
+            # D. Calculate the new homography based on the updated matches.
+            # A moderately lenient RANSAC threshold is good here.
+            new_H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            
+            if new_H is None:
+                print("      Warning: findHomography failed in iteration. Using previous matrix.")
+                break # Exit loop, use the last good homography
 
-        MAX_CORNER_DISTANCE = 25.0
-        src_pts, dst_pts = [], []
-        for i, dist in enumerate(distances):
-            if dist < MAX_CORNER_DISTANCE:
-                src_pts.append(cad_corners[i])
-                dst_pts.append(image_corners[indices[i]])
+            # E. Check for convergence (if the new matrix is very close to the old one).
+            if np.allclose(current_H, new_H, atol=1e-3):
+                print("      Converged.")
+                current_H = new_H
+                break
+                
+            current_H = new_H
 
-        if len(src_pts) < 4:
-            print(f"   Error: Not enough high-quality corner matches found (< 4). Found {len(src_pts)}.")
-            return None
-
-        print(f"   Found {len(src_pts)} high-quality corner matches.")
-        src_pts = np.float32(src_pts)
-        dst_pts = np.float32(dst_pts)
-
-        # 4. Calculate the final, precise homography
-        print("4. Calculating final homography from matched corners...")
-        H_final, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        print("4. Iterative refinement complete.")
+        
+        # Final check and debug visualization
+        final_src_pts = cad_corners
+        # Find final destination points based on the final homography for visualization
+        final_indices = image_corner_kdtree.query(cv2.perspectiveTransform(final_src_pts.reshape(-1, 1, 2), current_H).reshape(-1, 2))[1]
+        final_dst_pts = image_corners[final_indices]
+        # Get the mask for the final set of matches
+        _, final_mask = cv2.findHomography(final_src_pts, final_dst_pts, cv2.RANSAC, 5.0)
 
         # Visualize matches for debugging
         debug_img = self.original_cv_image.copy()
-        for p1, p2 in zip(src_pts, dst_pts):
-            p1_transformed = cv2.perspectiveTransform(p1.reshape(-1,1,2), H_final)[0][0]
-            cv2.circle(debug_img, tuple(p1_transformed.astype(int)), 5, (0, 255, 0), -1)
-            cv2.circle(debug_img, tuple(p2.astype(int)), 5, (0, 0, 255), -1)
-            cv2.line(debug_img, tuple(p1_transformed.astype(int)), tuple(p2.astype(int)), (255, 255, 0), 1)
-        self._resize_for_display("DEBUG: Corner Matches", debug_img)
+        if final_mask is not None:
+             for p1, p2, inlier in zip(final_src_pts, final_dst_pts, final_mask.ravel()):
+                if inlier: # Only draw inliers for clarity
+                    p1_transformed = cv2.perspectiveTransform(p1.reshape(-1,1,2), current_H)[0][0]
+                    cv2.circle(debug_img, tuple(p1_transformed.astype(int)), 5, (0, 255, 0), -1) # Green dot on transformed CAD
+                    cv2.circle(debug_img, tuple(p2.astype(int)), 8, (0, 255, 0), 2)     # Green circle on image corner
+                    cv2.line(debug_img, tuple(p1_transformed.astype(int)), tuple(p2.astype(int)), (255, 255, 0), 1)
+        self._resize_for_display("DEBUG: Final Iterative Matches", debug_img)
 
-        return H_final
+        return current_H
 
     # --- HELPER AND SUB-PIPELINE FUNCTIONS ---
 
-    def _extract_corners(self, contour):
+    # ==============================================================================
+    # === MODIFIED FUNCTION: Added epsilon_factor for tunable corner detection   ===
+    # ==============================================================================
+    def _extract_corners(self, contour, epsilon_factor=0.001):
         """
         Extracts corners from a contour using the Douglas-Peucker algorithm (approxPolyDP).
-        This provides a consistent, geometric method for both clean CAD data and noisy image contours.
+        
+        MODIFIED: Added epsilon_factor to make corner detection aggressiveness tunable.
+                  A larger factor (e.g., 0.01-0.02) finds more prominent corners.
         """
         if contour is None or len(contour) < 3:
             return None
         
         # Epsilon is the max distance a point can be from the simplified shape.
-        # A small percentage of the arc length is a good adaptive value for both CAD and image contours.
-        epsilon = 0.0001 * cv2.arcLength(contour, True)
+        # A percentage of the arc length is a good adaptive value.
+        epsilon = epsilon_factor * cv2.arcLength(contour, True)
         corners = cv2.approxPolyDP(contour, epsilon, True)
         
         return corners.reshape(-1, 2) if corners is not None else None
@@ -582,11 +615,7 @@ class InspectionApp:
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([70, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        
-        kernel = np.ones((5,5),np.uint8)
-        mask_cleaned = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
-        
-        contours, _ = cv2.findContours(mask_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
             return None
@@ -607,6 +636,7 @@ class InspectionApp:
             cv2.imshow(window_name, display_image)
         else:
             cv2.imshow(window_name, image)
+        cv2.waitKey(1) # Add a small wait to ensure the window updates
 
     def run_visualization(self):
         print("--- Running Input Visualization ---")
@@ -688,6 +718,7 @@ class InspectionApp:
 
         debug_img_final = self.original_cv_image.copy()
         cv2.drawContours(debug_img_final, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2)
+        # We need to use the original CAD contour for the final transform
         final_aligned_cad = cv2.transform(cad_contour_original.reshape(-1, 1, 2), final_transform)
         cv2.polylines(debug_img_final, [final_aligned_cad.astype(np.int32)], True, (0, 255, 0), 2, lineType=cv2.LINE_AA) # Green for final
         cv2.putText(debug_img_final, "3. Final Best-Fit (ICP)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
