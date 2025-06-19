@@ -431,7 +431,7 @@ class InspectionApp:
         cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
 
         image_corners = self._extract_corners(img_contour)
-        cad_corners = self._extract_corners(cad_contour_original)
+        cad_corners = self._extract_corners(cad_contour_original, use_binary_mask=False) 
 
         if image_corners is None or cad_corners is None:
             print("   Error: Corner detection failed on image or CAD contour.")
@@ -441,10 +441,8 @@ class InspectionApp:
 
         # 3. Intelligent Matching based on the baseline affine transform
         print("3. Matching corners using affine pre-alignment...")
-        # Apply the rough transform to the CAD corners to get them close to the image corners
         cad_corners_transformed = cv2.transform(cad_corners.reshape(-1, 1, 2), M_affine).reshape(-1, 2)
 
-        # Use KDTree for efficient nearest-neighbor search
         if len(image_corners) == 0:
             print("   Error: No corners found in image to match.")
             return None
@@ -452,8 +450,7 @@ class InspectionApp:
         
         distances, indices = image_corner_kdtree.query(cad_corners_transformed)
 
-        # Filter matches based on a distance threshold
-        MAX_CORNER_DISTANCE = 25.0  # pixels
+        MAX_CORNER_DISTANCE = 25.0
         src_pts, dst_pts = [], []
         for i, dist in enumerate(distances):
             if dist < MAX_CORNER_DISTANCE:
@@ -468,17 +465,16 @@ class InspectionApp:
         src_pts = np.float32(src_pts)
         dst_pts = np.float32(dst_pts)
 
-        # 4. Calculate the final, precise homography from the matched corner pairs
+        # 4. Calculate the final, precise homography
         print("4. Calculating final homography from matched corners...")
         H_final, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
-        # Visualize the matched corners for debugging
+        # Visualize matches for debugging
         debug_img = self.original_cv_image.copy()
         for p1, p2 in zip(src_pts, dst_pts):
-            # Transform the original CAD corner with the final homography to show the result
             p1_transformed = cv2.perspectiveTransform(p1.reshape(-1,1,2), H_final)[0][0]
-            cv2.circle(debug_img, tuple(p1_transformed.astype(int)), 5, (0, 255, 0), -1) # Green for transformed CAD
-            cv2.circle(debug_img, tuple(p2.astype(int)), 5, (0, 0, 255), -1) # Red for image corner
+            cv2.circle(debug_img, tuple(p1_transformed.astype(int)), 5, (0, 255, 0), -1)
+            cv2.circle(debug_img, tuple(p2.astype(int)), 5, (0, 0, 255), -1)
             cv2.line(debug_img, tuple(p1_transformed.astype(int)), tuple(p2.astype(int)), (255, 255, 0), 1)
         self._resize_for_display("DEBUG: Corner Matches", debug_img)
 
@@ -486,22 +482,33 @@ class InspectionApp:
 
     # --- HELPER AND SUB-PIPELINE FUNCTIONS ---
 
-    def _extract_corners(self, contour, max_corners=100, quality_level=0.01, min_distance=10):
-        """Extracts corners from a contour using cv2.goodFeaturesToTrack."""
+    def _extract_corners(self, contour, max_corners=300, quality_level=0.001, min_distance=7, use_binary_mask=True):
+        """
+        Extracts corners from a contour.
+        - For images (use_binary_mask=True), it uses goodFeaturesToTrack on a high-contrast mask to be robust against lighting.
+        - For CAD (use_binary_mask=False), it uses approxPolyDP to find the true geometric vertices.
+        """
         if contour is None or len(contour) < 3:
             return None
         
-        # Create a mask to focus corner detection only on the contour itself
-        mask = np.zeros(self.original_cv_image.shape[:2], dtype=np.uint8)
-        cv2.polylines(mask, [contour.astype(np.int32)], isClosed=True, color=255, thickness=2)
-        
-        corners = cv2.goodFeaturesToTrack(
-            image=cv2.cvtColor(self.original_cv_image, cv2.COLOR_BGR2GRAY),
-            maxCorners=max_corners,
-            qualityLevel=quality_level,
-            minDistance=min_distance,
-            mask=mask
-        )
+        if use_binary_mask:
+            # For image contours: use goodFeaturesToTrack on a binary mask for lighting robustness.
+            h, w = self.original_cv_image.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(mask, [contour.astype(np.int32)], -1, 255, -1) 
+            
+            corners = cv2.goodFeaturesToTrack(
+                image=mask,
+                maxCorners=max_corners,
+                qualityLevel=quality_level,
+                minDistance=min_distance
+            )
+        else:
+            # For CAD contours: use the Douglas-Peucker algorithm to find the geometric vertices.
+            # Epsilon is the max distance a point can be from the simplified shape.
+            # A small percentage of the arc length is a good adaptive value.
+            epsilon = 0.005 * cv2.arcLength(contour, True)
+            corners = cv2.approxPolyDP(contour, epsilon, True)
         
         return corners.reshape(-1, 2) if corners is not None else None
 
