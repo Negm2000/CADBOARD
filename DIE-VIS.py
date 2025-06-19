@@ -419,12 +419,16 @@ class InspectionApp:
     # ==============================================================================
     # === REPLACED FUNCTION: Iterative Homography with MSE Safety Check          ===
     # ==============================================================================
+    # ==============================================================================
+    # === REPLACED FUNCTION: Iterative Homography with MSE-based Convergence     ===
+    # ==============================================================================
     def align_with_homography_pipeline(self):
         """
         Calculates a robust homography, but only if it improves the alignment error
-        over the initial affine transformation. Otherwise, it falls back to affine.
+        over the initial affine transformation. The iterative process now stops
+        automatically once the MSE is no longer decreasing.
         """
-        print("--- Starting Smart Homography Pipeline (with MSE check) ---")
+        print("--- Starting Smart Homography Pipeline (with MSE convergence) ---")
 
         # 1. Get a ROBUST baseline affine transform
         print("1. Calculating baseline affine transformation...")
@@ -432,7 +436,7 @@ class InspectionApp:
         if M_affine is None:
             return None, "Error"
 
-        # 2. Get contours and corners
+        # 2. Get contours
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None: return None, "Error"
         cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
@@ -452,29 +456,53 @@ class InspectionApp:
             final_matrix = np.vstack([M_affine, [0, 0, 1]])
             return final_matrix, "Affine Fallback (Not enough corners)"
         
+        # --- MODIFIED ITERATION LOOP WITH MSE CONVERGENCE ---
         current_H = np.vstack([M_affine, [0, 0, 1]])
         image_corner_kdtree = KDTree(image_corners)
+        # Initialize previous_mse with the error from the affine transform
+        previous_mse = affine_mse 
         
-        for i in range(5): # 5 iterations
+        # Loop for a max of 10 iterations, but break early if MSE stops improving
+        for i in range(10):
+            print(f"   Iteration {i+1}:")
+            
+            # A. Re-project and Re-match using the current best homography
             cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
             _, indices = image_corner_kdtree.query(cad_corners_transformed)
             src_pts, dst_pts = cad_corners, image_corners[indices]
             
-            new_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-            if new_H is None: break
-            if np.allclose(current_H, new_H, atol=1e-3): break
-            current_H = new_H
+            # B. Calculate a candidate for the *next* homography
+            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            if next_H is None:
+                print("      Warning: findHomography failed. Using previous matrix.")
+                break # Stop if a valid matrix can't be found
+
+            # C. Calculate the MSE for this new candidate matrix
+            current_mse = self._calculate_alignment_error(cad_contour, img_contour, next_H)
+            if current_mse is None:
+                print("      Warning: Could not calculate MSE. Using previous matrix.")
+                break # Stop if error calculation fails
+            
+            print(f"      MSE for this iteration: {current_mse:.4f} (Previous best: {previous_mse:.4f})")
+
+            # D. CONVERGENCE CHECK: If the new error is not better than the previous error, stop.
+            # A small tolerance (1e-6) is used to prevent stopping on negligible floating point changes.
+            if current_mse >= previous_mse - 1e-6:
+                print("      MSE stopped decreasing. Converged on previous iteration's result.")
+                break # Exit the loop, keeping the existing current_H
+            
+            # E. If we haven't converged, accept the new matrix and MSE for the next round
+            current_H = next_H
+            previous_mse = current_mse
+        # --- END OF MODIFIED LOOP ---
+
         print("   Iterative refinement complete.")
 
-        # 5. Calculate the final MSE for the homography
-        homography_mse = self._calculate_alignment_error(cad_contour, img_contour, current_H)
-        if homography_mse is None:
-             print("   Warning: Could not calculate homography MSE. Falling back to affine.")
-             final_matrix = np.vstack([M_affine, [0, 0, 1]])
-             return final_matrix, "Affine Fallback (MSE calc failed)"
+        # 5. Get the final MSE for the best homography found during iteration
+        homography_mse = previous_mse # This holds the lowest MSE achieved
         print(f"   Final Homography MSE: {homography_mse:.4f}")
 
-        # 6. Compare MSE and make the final decision
+        # 6. Compare the best homography's MSE to the original affine MSE
         if homography_mse < affine_mse:
             print("   SUCCESS: Homography improved alignment. Using perspective transform.")
             # Visualize the successful homography matches
