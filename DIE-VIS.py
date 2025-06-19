@@ -114,8 +114,8 @@ class InspectionApp:
             bits_per_pixel = 24
             ret = ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
             if ret != ueye.IS_SUCCESS:
-                 messagebox.showerror("IDS Camera Error", f"Could not set color mode. Is camera color?")
-                 return
+                messagebox.showerror("IDS Camera Error", f"Could not set color mode. Is camera color?")
+                return
             ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
             ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
             print("Capturing image from IDS camera...")
@@ -176,11 +176,34 @@ class InspectionApp:
                 return [np.array(p, dtype=np.float32) for p in assembled_paths]
 
             outlines = process_layer("OUTLINE")
+            holes = process_layer("HOLES")
+            creases = process_layer("CREASES")
+
+            ## FIX: Correct the CAD coordinate system to match the image's system (Y-axis pointing down).
+            ## This is done once at load time to ensure all subsequent operations are consistent.
+            all_points_for_transform = []
+            if outlines: all_points_for_transform.extend(outlines)
+            if holes: all_points_for_transform.extend(holes)
+            if creases: all_points_for_transform.extend(creases)
+
+            if all_points_for_transform:
+                master_point_cloud = np.vstack([p for p in all_points_for_transform])
+                y_max_cad = np.max(master_point_cloud[:, 1])
+
+                def flip_y_axis(points):
+                    points[:, 1] = y_max_cad - points[:, 1]
+                    return points
+
+                outlines = [flip_y_axis(p) for p in outlines]
+                holes = [flip_y_axis(p) for p in holes]
+                creases = [flip_y_axis(p) for p in creases]
+                print("   Info: Flipped CAD Y-axis to match image coordinate system.")
+
             if outlines:
                 self.cad_features['outline'] = max(outlines, key=lambda p: cv2.arcLength(p.reshape(-1, 1, 2), False))
             
-            self.cad_features['holes'] = process_layer("HOLES")
-            self.cad_features['creases'] = process_layer("CREASES")
+            self.cad_features['holes'] = holes
+            self.cad_features['creases'] = creases
 
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
@@ -317,6 +340,7 @@ class InspectionApp:
             print("   Error: No contour found in the image.")
             return None
         
+        # CAD contour is already in the correct (Y-down) coordinate system from the load_dxf step
         cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         
         # --- Stage 1: Coarse Global Alignment (Moments) ---
@@ -329,8 +353,6 @@ class InspectionApp:
 
         # --- Stage 2: Fine Iterative Refinement (Iterative Closest Point) ---
         print("4. Fine Refinement: Using ICP to finalize alignment...")
-        # We can use resampled contours here for speed if desired, but using original
-        # contours provides higher precision for the final fit.
         final_transform = self._iterative_closest_point(
             source_points=cad_contour,
             target_points=img_contour,
@@ -388,8 +410,6 @@ class InspectionApp:
             scale = math.sqrt(M_img["m00"] / M_cad["m00"])
             
             # --- 3. Calculate Rotation from orientation ---
-            # This uses central moments to find the orientation angle of the shape's principal axis.
-            # Note: This can be ambiguous by 180 degrees and unstable for symmetric shapes.
             def get_orientation(M):
                 mu11 = M['mu11']
                 mu20 = M['mu20']
@@ -403,13 +423,6 @@ class InspectionApp:
             # --- 4. Build the 2x3 Affine Transformation Matrix ---
             cos_a = math.cos(rotation_angle_rad)
             sin_a = math.sin(rotation_angle_rad)
-
-            # Create the matrix in steps:
-            # 1. Center CAD contour at origin: (x - cad_cx)
-            # 2. Scale and rotate: s * R * (x - cad_cx)
-            # 3. Translate to image centroid: s * R * (x - cad_cx) + img_c
-            # This expands to: (s*R*x) - (s*R*cad_c) + img_c
-            # The matrix part is [s*R], the translation part is [img_c - s*R*cad_c]
             
             tx = img_cx - (scale * (cad_cx * cos_a - cad_cy * sin_a))
             ty = img_cy - (scale * (cad_cx * sin_a + cad_cy * cos_a))
@@ -515,8 +528,12 @@ class InspectionApp:
             if cad_w > 0 and cad_h > 0:
                 scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
                 cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
+
+                ## FIX: The transformation for visualization is now simpler because the coordinate systems
+                ## already match. We no longer need to manually flip the Y-axis here.
                 def transform_pt(points):
-                    return ((points - [x_min, y_min]) * [scale, -scale] + [padding, CANVAS_H - padding]).astype(np.int32)
+                    return ((points - [x_min, y_min]) * scale + padding).astype(np.int32)
+                
                 cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['holes']], True, (0, 255, 255), 1)
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['creases']], False, (255, 255, 0), 1)
