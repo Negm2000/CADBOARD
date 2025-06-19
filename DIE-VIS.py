@@ -175,36 +175,17 @@ class InspectionApp:
                 assembled_paths = self._assemble_paths(segments)
                 return [np.array(p, dtype=np.float32) for p in assembled_paths]
 
+            ## CHANGE: Load all data with its original coordinate system. Do not flip here.
             outlines = process_layer("OUTLINE")
             holes = process_layer("HOLES")
             creases = process_layer("CREASES")
-
-            ## FIX: Correct the CAD coordinate system to match the image's system (Y-axis pointing down).
-            ## This is done once at load time to ensure all subsequent operations are consistent.
-            all_points_for_transform = []
-            if outlines: all_points_for_transform.extend(outlines)
-            if holes: all_points_for_transform.extend(holes)
-            if creases: all_points_for_transform.extend(creases)
-
-            if all_points_for_transform:
-                master_point_cloud = np.vstack([p for p in all_points_for_transform])
-                y_max_cad = np.max(master_point_cloud[:, 1])
-
-                def flip_y_axis(points):
-                    points[:, 1] = y_max_cad - points[:, 1]
-                    return points
-
-                outlines = [flip_y_axis(p) for p in outlines]
-                holes = [flip_y_axis(p) for p in holes]
-                creases = [flip_y_axis(p) for p in creases]
-                print("   Info: Flipped CAD Y-axis to match image coordinate system.")
-
+            
             if outlines:
                 self.cad_features['outline'] = max(outlines, key=lambda p: cv2.arcLength(p.reshape(-1, 1, 2), False))
             
             self.cad_features['holes'] = holes
             self.cad_features['creases'] = creases
-
+            
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
             print("--- DXF Parse Complete ---")
@@ -299,7 +280,6 @@ class InspectionApp:
             messagebox.showerror("Input Error", "Please load both an image and a DXF file with an 'OUTLINE' layer.")
             return
 
-        # The new pipeline returns a 2x3 rigid transformation matrix
         transform_matrix = self.align_with_moments_icp_pipeline()
         
         if transform_matrix is None:
@@ -312,11 +292,11 @@ class InspectionApp:
         result_image = self.original_cv_image.copy()
         
         def apply_rigid_transform(points, M):
-            # cv2.transform requires shape (N, 1, 2) or (1, N, 2)
             points_reshaped = points.reshape(-1, 1, 2)
             transformed_points = cv2.transform(points_reshaped, M)
             return transformed_points
 
+        # Apply the chosen best-fit transform to the original features
         transformed_outline = apply_rigid_transform(self.cad_features['outline'], transform_matrix)
         cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
 
@@ -331,68 +311,89 @@ class InspectionApp:
         messagebox.showinfo("Inspection Complete", "The DXF features have been aligned using the Moments+ICP pipeline.")
         print("--- Inspection Complete ---")
 
+    ## CHANGE: The main pipeline now tests both Y-up and Y-down CAD orientations and picks the best one.
     def align_with_moments_icp_pipeline(self):
-        """Orchestrates the Moments+ICP registration pipeline."""
-        # --- Stage 0: Preprocessing ---
+        """Orchestrates the Moments+ICP registration pipeline, testing for Y-axis flips."""
         print("1. Preprocessing: Extracting and preparing contours...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
             print("   Error: No contour found in the image.")
             return None
         
-        # CAD contour is already in the correct (Y-down) coordinate system from the load_dxf step
-        cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
+        cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         
-        # --- Stage 1: Coarse Global Alignment (Moments) ---
-        print("2. Coarse Alignment: Using Shape Moments to find initial pose...")
-        coarse_transform = self._align_with_moments(cad_contour, img_contour)
-        if coarse_transform is None:
-             print("   Error: Coarse alignment with Moments failed.")
+        # --- Pass 1: Align with Y-axis Flipped (Image-style coordinates) ---
+        print("\n--- Starting Pass 1: Y-Flipped (Image Coordinate System) ---")
+        y_max = np.max(cad_contour_original[:, 1])
+        cad_contour_yflipped = cad_contour_original.copy()
+        cad_contour_yflipped[:, 1] = y_max - cad_contour_yflipped[:, 1]
+        
+        coarse_transform_1 = self._align_with_moments(cad_contour_yflipped, img_contour)
+        if coarse_transform_1 is None:
+             print("   Error: Coarse alignment failed on Pass 1.")
              return None
-        print("3. Coarse alignment successful.")
-
-        # --- Stage 2: Fine Iterative Refinement (Iterative Closest Point) ---
-        print("4. Fine Refinement: Using ICP to finalize alignment...")
-        final_transform = self._iterative_closest_point(
-            source_points=cad_contour,
+        
+        final_transform_1, final_mse_1 = self._iterative_closest_point(
+            source_points=cad_contour_yflipped,
             target_points=img_contour,
-            initial_matrix=coarse_transform
+            initial_matrix=coarse_transform_1
         )
+        if final_transform_1 is None:
+            print("   Error: ICP failed on Pass 1.")
+            return None
+        print(f"   Pass 1 (Y-Flipped) Complete. MSE: {final_mse_1:.4f}")
 
-        return final_transform
+        # --- Pass 2: Align with Original CAD coordinates (Y-axis pointing up) ---
+        print("\n--- Starting Pass 2: Original (CAD Coordinate System) ---")
+        coarse_transform_2 = self._align_with_moments(cad_contour_original, img_contour)
+        if coarse_transform_2 is None:
+            print("   Error: Coarse alignment failed on Pass 2.")
+            return None
+
+        final_transform_2, final_mse_2 = self._iterative_closest_point(
+            source_points=cad_contour_original,
+            target_points=img_contour,
+            initial_matrix=coarse_transform_2
+        )
+        if final_transform_2 is None:
+            print("   Error: ICP failed on Pass 2.")
+            return None
+        print(f"   Pass 2 (Original) Complete. MSE: {final_mse_2:.4f}")
+        
+        # --- Compare results and choose the best one ---
+        if final_mse_1 < final_mse_2:
+            print(f"\n--- Y-Flipped alignment is better (MSE {final_mse_1:.4f} < {final_mse_2:.4f}). ---")
+            # We need to create a transform that first flips the original data, then applies the calculated transform.
+            # T_final = T_align * T_flip
+            y_flip_matrix = np.array([[1, 0, 0], [0, -1, y_max]], dtype=np.float32)
+            
+            # Convert to 3x3 for matrix multiplication
+            T_flip_3x3 = np.vstack([y_flip_matrix, [0, 0, 1]])
+            T_align_3x3 = np.vstack([final_transform_1, [0, 0, 1]])
+            
+            combined_transform_3x3 = T_align_3x3 @ T_flip_3x3
+            return combined_transform_3x3[:2, :] # Return as 2x3 matrix
+        else:
+            print(f"\n--- Original alignment is better (MSE {final_mse_2:.4f} <= {final_mse_1:.4f}). ---")
+            return final_transform_2
 
     def _resample_contour(self, contour, num_points):
-        """
-        Resamples a contour to have a specific number of uniformly spaced points.
-        This version uses interpolation for robustness.
-        """
         contour = contour.reshape(-1, 2).astype(np.float32)
-        
-        # Calculate the cumulative arc length along the contour, ensuring no negative inputs to sqrt
         distances = np.cumsum(np.sqrt(np.maximum(0, np.sum(np.diff(contour, axis=0, append=contour[0:1])**2, axis=1))))
         arc_length = distances[-1]
         
-        # Handle degenerate case where contour has no length
         if arc_length == 0:
             return np.array([contour[0]] * num_points, dtype=np.float32)
             
-        # Create the new, evenly spaced distances
         fx = distances / arc_length
         fy = np.linspace(0, 1, num_points)
-        
-        # Interpolate the x and y coordinates
         x_new = np.interp(fy, fx, contour[:, 0])
         y_new = np.interp(fy, fx, contour[:, 1])
         
         return np.array([x_new, y_new]).T.astype(np.float32)
 
     def _align_with_moments(self, cad_contour, img_contour):
-        """
-        Estimates a coarse transformation using shape moments.
-        Calculates translation, scale, and rotation.
-        """
         try:
-            # --- Calculate moments for both contours ---
             M_cad = cv2.moments(cad_contour)
             M_img = cv2.moments(img_contour)
             
@@ -400,16 +401,13 @@ class InspectionApp:
                 print("   Error: Contour with zero area found.")
                 return None
             
-            # --- 1. Calculate Centroids for Translation ---
             cad_cx = M_cad["m10"] / M_cad["m00"]
             cad_cy = M_cad["m01"] / M_cad["m00"]
             img_cx = M_img["m10"] / M_img["m00"]
             img_cy = M_img["m01"] / M_img["m00"]
 
-            # --- 2. Calculate Scale from contour areas ---
             scale = math.sqrt(M_img["m00"] / M_cad["m00"])
             
-            # --- 3. Calculate Rotation from orientation ---
             def get_orientation(M):
                 mu11 = M['mu11']
                 mu20 = M['mu20']
@@ -420,7 +418,6 @@ class InspectionApp:
             angle_img = get_orientation(M_img)
             rotation_angle_rad = angle_img - angle_cad
 
-            # --- 4. Build the 2x3 Affine Transformation Matrix ---
             cos_a = math.cos(rotation_angle_rad)
             sin_a = math.sin(rotation_angle_rad)
             
@@ -438,55 +435,37 @@ class InspectionApp:
             return None
 
     def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
-        """
-        Custom implementation of the Iterative Closest Point algorithm.
-        Refines the alignment of source_points to target_points.
-        """
         source_pts = source_points.reshape(-1, 2)
         target_pts = target_points.reshape(-1, 2)
-
         target_kdtree = KDTree(target_pts)
-        
         current_transform = initial_matrix.copy()
-        
         prev_error = float('inf')
 
         for i in range(max_iterations):
             source_transformed = cv2.transform(source_pts.reshape(-1, 1, 2), current_transform).reshape(-1, 2)
-            
             distances, indices = target_kdtree.query(source_transformed)
             correspondences = target_pts[indices]
             
-            # Use LMEDS for robustness against some outlier correspondences
             new_transform, _ = cv2.estimateAffine2D(source_pts, correspondences, method=cv2.LMEDS)
-
             if new_transform is None:
-                print("   ICP Warning: Could not estimate transform in iteration. Using previous.")
-                break # Exit if estimation fails
+                print("   ICP Warning: Could not estimate transform in iteration. Returning previous best.")
+                return current_transform, prev_error 
 
             current_transform = new_transform
-            
             mean_error = np.mean(distances**2)
             if abs(prev_error - mean_error) < tolerance:
-                print(f"   ICP converged in {i+1} iterations. Final MSE: {mean_error:.4f}")
-                break
+                return current_transform, mean_error
             prev_error = mean_error
-        else:
-             print(f"   ICP reached max iterations. Final MSE: {prev_error:.4f}")
-
-        return current_transform
+        
+        return current_transform, prev_error
 
     def find_image_contour(self, image):
-        """Finds the largest contour in the image using HSV color masking."""
         if image is None: return None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        # These values may need tuning for different lighting/object colors
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([30, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        
         kernel = np.ones((5,5),np.uint8)
         mask_cleaned = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
-        
         contours, hierarchy = cv2.findContours(mask_cleaned, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
@@ -506,7 +485,6 @@ class InspectionApp:
     # --- VISUALIZATION AND DEBUGGING ---
 
     def _resize_for_display(self, window_name, image, max_dim=900):
-        """Resizes an image to a maximum dimension for display while preserving aspect ratio."""
         h, w = image.shape[:2]
         if h > max_dim or w > max_dim:
             scale = max_dim / max(h, w)
@@ -529,10 +507,10 @@ class InspectionApp:
                 scale = min((CANVAS_W - 2 * padding) / cad_w, (CANVAS_H - 2 * padding) / cad_h)
                 cad_canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
 
-                ## FIX: The transformation for visualization is now simpler because the coordinate systems
-                ## already match. We no longer need to manually flip the Y-axis here.
+                ## CHANGE: Re-introduce the Y-flip for visualization since the stored data is now always Y-up.
                 def transform_pt(points):
-                    return ((points - [x_min, y_min]) * scale + padding).astype(np.int32)
+                    # Flips from Y-up (CAD) to Y-down (Image/Canvas) for display
+                    return ((points - [x_min, y_min]) * [scale, -scale] + [padding, CANVAS_H - padding]).astype(np.int32)
                 
                 cv2.polylines(cad_canvas, [transform_pt(self.cad_features['outline'])], True, (255, 255, 255), 1)
                 cv2.polylines(cad_canvas, [transform_pt(p) for p in self.cad_features['holes']], True, (0, 255, 255), 1)
@@ -554,7 +532,6 @@ class InspectionApp:
         """Debug function to visualize the new Moments+ICP pipeline."""
         print("\n--- Running Moments+ICP Pipeline Debug Visualization ---")
         
-        # --- Stage 0: Inputs ---
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None: return messagebox.showerror("Debug Error", "No contour found in image.")
         cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
@@ -563,28 +540,17 @@ class InspectionApp:
         cv2.drawContours(debug_img_inputs, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2, lineType=cv2.LINE_AA)
         self._resize_for_display("Debug 0: Detected Image Contour", debug_img_inputs)
         
-        # --- Stage 1: Coarse Alignment ---
-        coarse_transform = self._align_with_moments(cad_contour, img_contour)
-        
-        if coarse_transform is None:
-            return messagebox.showerror("Debug Error", "Coarse alignment (Moments) step failed.")
-
-        debug_img_coarse = self.original_cv_image.copy()
-        cv2.drawContours(debug_img_coarse, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2)
-        coarsely_aligned_cad = cv2.transform(cad_contour.reshape(-1, 1, 2), coarse_transform)
-        cv2.polylines(debug_img_coarse, [coarsely_aligned_cad.astype(np.int32)], True, (0, 255, 255), 2)
-        self._resize_for_display("Debug 1: Coarse (Moments) Alignment", debug_img_coarse)
-
-        # --- Stage 2: Fine Alignment ---
-        final_transform = self._iterative_closest_point(cad_contour, img_contour, coarse_transform)
+        # We call the main pipeline to get the absolute best transform for the final debug viz
+        final_transform = self.align_with_moments_icp_pipeline()
         if final_transform is None:
-            return messagebox.showerror("Debug Error", "Fine alignment (ICP) step failed.")
+            return messagebox.showerror("Debug Error", "Entire alignment pipeline failed.")
 
         debug_img_final = self.original_cv_image.copy()
         cv2.drawContours(debug_img_final, [img_contour.astype(np.int32)], -1, (255, 0, 255), 2)
+        # Apply the final, best-fit transform to the original CAD contour for visualization
         final_aligned_cad = cv2.transform(cad_contour.reshape(-1, 1, 2), final_transform)
         cv2.polylines(debug_img_final, [final_aligned_cad.astype(np.int32)], True, (0, 255, 0), 2) # Green for final
-        self._resize_for_display("Debug 2: Final (ICP) Alignment", debug_img_final)
+        self._resize_for_display("Debug 2: Final Best-Fit Alignment", debug_img_final)
 
         messagebox.showinfo("Debug", "Debug windows opened. Examine the stages of alignment.")
 
