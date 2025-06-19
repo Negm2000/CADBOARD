@@ -430,8 +430,9 @@ class InspectionApp:
             
         cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
 
+        # Use the consistent approxPolyDP method for both
         image_corners = self._extract_corners(img_contour)
-        cad_corners = self._extract_corners(cad_contour_original, use_binary_mask=False) 
+        cad_corners = self._extract_corners(cad_contour_original) 
 
         if image_corners is None or cad_corners is None:
             print("   Error: Corner detection failed on image or CAD contour.")
@@ -482,33 +483,18 @@ class InspectionApp:
 
     # --- HELPER AND SUB-PIPELINE FUNCTIONS ---
 
-    def _extract_corners(self, contour, max_corners=300, quality_level=0.001, min_distance=7, use_binary_mask=True):
+    def _extract_corners(self, contour):
         """
-        Extracts corners from a contour.
-        - For images (use_binary_mask=True), it uses goodFeaturesToTrack on a high-contrast mask to be robust against lighting.
-        - For CAD (use_binary_mask=False), it uses approxPolyDP to find the true geometric vertices.
+        Extracts corners from a contour using the Douglas-Peucker algorithm (approxPolyDP).
+        This provides a consistent, geometric method for both clean CAD data and noisy image contours.
         """
         if contour is None or len(contour) < 3:
             return None
         
-        if use_binary_mask:
-            # For image contours: use goodFeaturesToTrack on a binary mask for lighting robustness.
-            h, w = self.original_cv_image.shape[:2]
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.drawContours(mask, [contour.astype(np.int32)], -1, 255, -1) 
-            
-            corners = cv2.goodFeaturesToTrack(
-                image=mask,
-                maxCorners=max_corners,
-                qualityLevel=quality_level,
-                minDistance=min_distance
-            )
-        else:
-            # For CAD contours: use the Douglas-Peucker algorithm to find the geometric vertices.
-            # Epsilon is the max distance a point can be from the simplified shape.
-            # A small percentage of the arc length is a good adaptive value.
-            epsilon = 0.005 * cv2.arcLength(contour, True)
-            corners = cv2.approxPolyDP(contour, epsilon, True)
+        # Epsilon is the max distance a point can be from the simplified shape.
+        # A small percentage of the arc length is a good adaptive value for both CAD and image contours.
+        epsilon = 0.0001 * cv2.arcLength(contour, True)
+        corners = cv2.approxPolyDP(contour, epsilon, True)
         
         return corners.reshape(-1, 2) if corners is not None else None
 
