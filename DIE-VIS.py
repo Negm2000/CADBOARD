@@ -9,19 +9,14 @@ import os
 import traceback
 from scipy.spatial import KDTree
 
-# This library needs to be installed, e.g., via 'pip install pyueye'
 try:
     from pyueye import ueye
 except ImportError:
-    # Create a mock ueye object if the library is not installed
-    # This allows the GUI to run for development without a camera connected
     print("WARNING: pyueye library not found. IDS Camera functionality will be disabled.")
     class MockUeye:
         def __getattr__(self, name):
             def method(*args, **kwargs):
-                print(f"MOCK UEYE: Call to {name} with args={args} kwargs={kwargs}")
-                if name == 'is_InitCamera':
-                    return -1 # Simulate camera not found
+                if name == 'is_InitCamera': return -1
                 return 0
             return method
     ueye = MockUeye()
@@ -32,16 +27,16 @@ class InspectionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Geometric Engine)")
-        self.root.geometry("1300x900") # Increased height for sliders
+        self.root.geometry("1300x900")
 
         # --- State Variables ---
         self.image_path = None
         self.dxf_path = None
         self.cv_image = None
-        self.original_cv_image = None # Store original for resets
+        self.original_cv_image = None 
         self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         self.last_transform_matrix = None
-        self.last_transform_type = None # Will be 'affine' or 'homography'
+        self.last_transform_type = None
         
         # --- UI Colors and Styles ---
         self.colors = {
@@ -55,57 +50,62 @@ class InspectionApp:
         main_frame = tk.Frame(root, bg=self.colors["bg"])
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        control_frame = tk.Frame(main_frame, bg=self.colors["bg"])
-        control_frame.pack(fill=tk.X, pady=(0, 5))
+        # All control widgets go into this top-level frame
+        top_controls_frame = tk.Frame(main_frame, bg=self.colors["bg"])
+        top_controls_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 10))
 
+        # Frame 1: Main action buttons
+        control_frame_1 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
+        control_frame_1.pack(fill=tk.X, pady=(0, 5))
+        # Frame 2: Anomaly detection controls
+        control_frame_2 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
+        control_frame_2.pack(fill=tk.X, pady=5)
+        # Frame 3: Status labels
+        control_frame_3 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
+        control_frame_3.pack(fill=tk.X, pady=(5,10))
+        
+        # Final expanding frame for the image
         self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
         self.image_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- Control Widgets ---
-        self.btn_load_image = ttk.Button(control_frame, text="1a. Load Image File", command=self.load_image)
+        # --- Populate Control Widgets ---
+        # Frame 1 Contents
+        self.btn_load_image = ttk.Button(control_frame_1, text="1a. Load Image File", command=self.load_image)
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
-
-        self.btn_capture_ids = ttk.Button(control_frame, text="1b. Capture from IDS", command=self.capture_from_ids)
+        self.btn_capture_ids = ttk.Button(control_frame_1, text="1b. Capture from IDS", command=self.capture_from_ids)
         self.btn_capture_ids.pack(side=tk.LEFT, padx=5)
-
-        self.btn_load_dxf = ttk.Button(control_frame, text="2. Load DXF", command=self.load_dxf)
+        self.btn_load_dxf = ttk.Button(control_frame_1, text="2. Load DXF", command=self.load_dxf)
         self.btn_load_dxf.pack(side=tk.LEFT, padx=(15,5))
-        
-        self.btn_visualize = ttk.Button(control_frame, text="Visualize Inputs", state=tk.DISABLED, command=self.run_visualization)
+        self.btn_visualize = ttk.Button(control_frame_1, text="Visualize Inputs", state=tk.DISABLED, command=self.run_visualization)
         self.btn_visualize.pack(side=tk.LEFT, padx=(20, 5))
-        
-        self.btn_inspect = ttk.Button(control_frame, text="Align (Affine)", state=tk.DISABLED, command=self.run_alignment_and_inspection)
+        self.btn_inspect = ttk.Button(control_frame_1, text="Align (Affine)", state=tk.DISABLED, command=self.run_alignment_and_inspection)
         self.btn_inspect.pack(side=tk.LEFT, padx=5)
-
-        self.btn_inspect_homography = ttk.Button(control_frame, text="Align (Homography)", state=tk.DISABLED, command=self.run_homography_inspection)
+        self.btn_inspect_homography = ttk.Button(control_frame_1, text="Align (Homography)", state=tk.DISABLED, command=self.run_homography_inspection)
         self.btn_inspect_homography.pack(side=tk.LEFT, padx=5)
-        
-        self.btn_find_anomalies = ttk.Button(control_frame, text="Find Anomalies", state=tk.DISABLED, command=self.run_anomaly_detection, style="Accent.TButton")
+        self.btn_find_anomalies = ttk.Button(control_frame_1, text="Find Anomalies", state=tk.DISABLED, command=self.run_anomaly_detection, style="Accent.TButton")
         self.btn_find_anomalies.pack(side=tk.LEFT, padx=(15, 5))
         
-        self.lbl_image_status = tk.Label(control_frame, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
-        self.lbl_image_status.pack(side=tk.LEFT)
-        
-        self.lbl_dxf_status = tk.Label(control_frame, text="DXF: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
-        self.lbl_dxf_status.pack(side=tk.LEFT)
-        
-        # --- Sliders for Anomaly Detection Control ---
-        control_frame_2 = tk.Frame(main_frame, bg=self.colors["bg"])
-        control_frame_2.pack(fill=tk.X, pady=5)
-        
-        self.lbl_area = tk.Label(control_frame_2, text="Min Anomaly Area:", bg=self.colors["bg"], fg=self.colors["fg"])
+        # Frame 2 Contents (Simplified and corrected controls)
+        self.lbl_area = tk.Label(control_frame_2, text="Min Area (% of Object):", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_area.pack(side=tk.LEFT, padx=(15, 5))
-        self.area_slider = ttk.Scale(control_frame_2, from_=10, to=1000, orient=tk.HORIZONTAL, length=150)
-        self.area_slider.set(50) # Default value
+        self.area_slider_var = tk.DoubleVar(value=0.1) 
+        self.area_slider = ttk.Scale(control_frame_2, from_=0.01, to=1.0, orient=tk.HORIZONTAL, length=200, variable=self.area_slider_var)
         self.area_slider.pack(side=tk.LEFT, padx=5)
+        
+        self.debug_mode = tk.BooleanVar()
+        self.chk_debug = tk.Checkbutton(control_frame_2, text="Debug Mode", variable=self.debug_mode, 
+                                        bg=self.colors["bg"], fg=self.colors["fg"], 
+                                        selectcolor=self.colors["btn"], activebackground=self.colors["bg"],
+                                        activeforeground=self.colors["fg"], highlightthickness=0)
+        self.chk_debug.pack(side=tk.LEFT, padx=(25, 5))
 
-        self.lbl_hole_sens = tk.Label(control_frame_2, text="Hole Classifier Sensitivity:", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_hole_sens.pack(side=tk.LEFT, padx=(25, 5))
-        self.hole_sensitivity_slider = ttk.Scale(control_frame_2, from_=1, to=50, orient=tk.HORIZONTAL, length=150)
-        self.hole_sensitivity_slider.set(10) # Default value
-        self.hole_sensitivity_slider.pack(side=tk.LEFT, padx=5)
+        # Frame 3 Contents
+        self.lbl_image_status = tk.Label(control_frame_3, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
+        self.lbl_image_status.pack(side=tk.LEFT)
+        self.lbl_dxf_status = tk.Label(control_frame_3, text="DXF: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
+        self.lbl_dxf_status.pack(side=tk.LEFT)
 
-        # --- Image Display ---
+        # Image Display Setup
         self.image_label = tk.Label(self.image_frame, bg="#000000")
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.image_label.bind("<Configure>", self.on_resize)
@@ -114,16 +114,12 @@ class InspectionApp:
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("TButton", padding=6, relief="flat", background=self.colors["btn"], foreground=self.colors["fg"], font=('Helvetica', 10, 'bold'), borderwidth=0)
-        style.map("TButton", 
-                  background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')],
-                  foreground=[('disabled', '#888888')])
+        style.map("TButton", background=[('active', self.colors["btn_active"]), ('disabled', '#3D3D3D')], foreground=[('disabled', '#888888')])
         style.configure("Accent.TButton", background=self.colors["accent"], foreground=self.colors["accent_fg"], font=('Helvetica', 10, 'bold'))
         style.map("Accent.TButton", background=[('active', '#005f9e'), ('disabled', '#3D3D3D')])
-        
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
-
 
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
@@ -136,10 +132,38 @@ class InspectionApp:
             self.lbl_image_status.config(text=f"Image: {os.path.basename(self.image_path)}")
             self.update_image_display(self.cv_image)
             self._check_files_loaded()
-            self.last_transform_matrix = None # Reset alignment on new image
+            self.last_transform_matrix = None 
         except Exception as e:
             messagebox.showerror("Image Load Error", f"Failed to load image: {e}")
             self.reset_image_state()
+
+    def capture_from_ids(self):
+        h_cam = ueye.HIDS(0) 
+        mem_ptr = ueye.c_mem_p()
+        mem_id = ueye.int()
+        try:
+            ret = ueye.is_InitCamera(h_cam, None)
+            if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", f"Could not initialize camera. Error code: {ret}"); return
+            sensor_info = ueye.SENSORINFO(); ueye.is_GetSensorInfo(h_cam, sensor_info)
+            width, height = int(sensor_info.nMaxWidth), int(sensor_info.nMaxHeight)
+            bits_per_pixel = 24
+            ret = ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
+            if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", "Could not set color mode. Is camera color?"); return
+            ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
+            ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
+            ret = ueye.is_FreezeVideo(h_cam, ueye.IS_WAIT)
+            if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", "Could not capture image from camera."); return
+            array = ueye.get_data(mem_ptr, width, height, bits_per_pixel, width * bits_per_pixel // 8, copy=True)
+            self.original_cv_image = np.reshape(array, (height, width, 3))
+            self.cv_image = self.original_cv_image.copy()
+            self.lbl_image_status.config(text="Image: From IDS Camera"); self.image_path = "IDS_Capture"
+            self.update_image_display(self.cv_image); self._check_files_loaded(); self.last_transform_matrix = None 
+            messagebox.showinfo("Success", "Image captured successfully from IDS camera.")
+        except Exception as e:
+            messagebox.showerror("IDS Camera Error", f"An unexpected error occurred: {traceback.format_exc()}")
+        finally:
+            if mem_ptr: ueye.is_FreeImageMem(h_cam, mem_ptr, mem_id)
+            if h_cam: ueye.is_ExitCamera(h_cam)
 
     def load_dxf(self):
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
@@ -148,7 +172,6 @@ class InspectionApp:
         try:
             doc = ezdxf.readfile(self.dxf_path)
             msp = doc.modelspace()
-            # ... (DXF parsing logic remains the same)
             self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
             def process_layer(layer_name):
                 segments = []
@@ -167,56 +190,155 @@ class InspectionApp:
             self.cad_features['creases'] = creases
             self.lbl_dxf_status.config(text=f"DXF: {os.path.basename(self.dxf_path)}")
             self._check_files_loaded()
-            self.last_transform_matrix = None # Reset alignment on new DXF
+            self.last_transform_matrix = None 
         except Exception as e:
-            error_details = traceback.format_exc()
-            messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{e}\n\nDetails:\n{error_details}")
+            messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{traceback.format_exc()}")
             self.reset_dxf_state()
+
+    def run_anomaly_detection(self):
+        print("\n--- Starting Anomaly Detection ---")
+        if self.last_transform_matrix is None:
+            messagebox.showerror("Prerequisite Error", "You must run an alignment first.")
+            return
+
+        print(f"1. Using pre-calculated '{self.last_transform_type}' alignment.")
+        transform_matrix = self.last_transform_matrix
+        h, w = self.original_cv_image.shape[:2]
+
+        print("2. Generating 'Ideal Mask' from aligned DXF...")
+        dxf_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Determine which transformation function to use based on the last alignment type
+        transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
+        
+        transformed_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
+        cv2.drawContours(dxf_mask, [transformed_outline.astype(np.int32)], -1, 255, cv2.FILLED)
+        for hole in self.cad_features['holes']:
+            if hole.size > 0:
+                transformed_hole = transform_func(hole.reshape(-1, 1, 2), transform_matrix)
+                cv2.drawContours(dxf_mask, [transformed_hole.astype(np.int32)], -1, 0, cv2.FILLED)
+
+        print("3. Generating 'Actual Mask' and ROI from image contours...")
+        image_contours = self.find_image_contours_with_holes(self.original_cv_image)
+        if not image_contours:
+            messagebox.showerror("Detection Error", "Could not find any object contours in the image.")
+            return
             
-    # ... (capture_from_ids, _check_files_loaded, on_resize, update_image_display, _extract_entity_points, _assemble_paths, reset_image_state, reset_dxf_state remain the same) ...
-    def capture_from_ids(self):
-        # This function remains unchanged
-        h_cam = ueye.HIDS(0) 
-        mem_ptr = ueye.c_mem_p()
-        mem_id = ueye.int()
-        try:
-            ret = ueye.is_InitCamera(h_cam, None)
-            if ret != ueye.IS_SUCCESS:
-                messagebox.showerror("IDS Camera Error", f"Could not initialize camera. Error code: {ret}")
-                return
-            sensor_info = ueye.SENSORINFO()
-            ueye.is_GetSensorInfo(h_cam, sensor_info)
-            width, height = int(sensor_info.nMaxWidth), int(sensor_info.nMaxHeight)
-            bits_per_pixel = 24
-            ret = ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
-            if ret != ueye.IS_SUCCESS:
-                messagebox.showerror("IDS Camera Error", f"Could not set color mode. Is camera color?")
-                return
-            ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
-            ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
-            print("Capturing image from IDS camera...")
-            ret = ueye.is_FreezeVideo(h_cam, ueye.IS_WAIT)
-            if ret != ueye.IS_SUCCESS:
-                messagebox.showerror("IDS Camera Error", "Could not capture image from camera.")
-                return
-            array = ueye.get_data(mem_ptr, width, height, bits_per_pixel, width * bits_per_pixel // 8, copy=True)
-            frame_bgr = np.reshape(array, (height, width, 3))
-            self.original_cv_image = frame_bgr
-            self.cv_image = self.original_cv_image.copy()
-            self.lbl_image_status.config(text="Image: From IDS Camera")
-            self.image_path = "IDS_Capture"
-            self.update_image_display(self.cv_image)
-            self._check_files_loaded()
-            self.last_transform_matrix = None # Reset alignment on new image
-            messagebox.showinfo("Success", "Image captured successfully from IDS camera.")
-        except Exception as e:
-            error_details = traceback.format_exc()
-            messagebox.showerror("IDS Camera Error", f"An unexpected error occurred: {e}\n\n{error_details}\n\n- Is the pyueye library installed?\n- Is the camera connected?\n- Are the IDS drivers installed?")
-        finally:
-            if mem_ptr: ueye.is_FreeImageMem(h_cam, mem_ptr, mem_id)
-            if h_cam: ueye.is_ExitCamera(h_cam)
-            print("IDS Camera resources released.")
-            
+        image_mask = np.zeros((h, w), dtype=np.uint8)
+        roi_mask = np.zeros((h, w), dtype=np.uint8)
+        main_part_contour = max(image_contours, key=cv2.contourArea)
+        cv2.drawContours(image_mask, image_contours, -1, 255, cv2.FILLED)
+        cv2.drawContours(roi_mask, [main_part_contour], -1, 255, cv2.FILLED)
+
+        print("4. Calculating relative area threshold...")
+        total_object_area = cv2.contourArea(main_part_contour)
+        if total_object_area == 0:
+            messagebox.showerror("Error", "Detected object has zero area. Cannot calculate relative thresholds.")
+            return
+        min_area_percent = self.area_slider_var.get()
+        min_pixel_area = (min_area_percent / 100.0) * total_object_area
+        print(f"   Object Area: {total_object_area:.0f}px | Min Anomaly: {min_area_percent:.2f}% ({min_pixel_area:.2f}px)")
+
+        print("5. Finding extra and missing features...")
+        extra_feature_mask = cv2.subtract(image_mask, dxf_mask)
+        extra_feature_mask = cv2.bitwise_and(extra_feature_mask, roi_mask)
+        missing_feature_mask = cv2.subtract(dxf_mask, image_mask)
+
+        if self.debug_mode.get():
+            dxf_color = cv2.cvtColor(dxf_mask, cv2.COLOR_GRAY2BGR)
+            img_color = cv2.cvtColor(image_mask, cv2.COLOR_GRAY2BGR)
+            roi_color = cv2.cvtColor(roi_mask, cv2.COLOR_GRAY2BGR)
+            debug_stack = np.hstack([dxf_color, img_color, roi_color])
+            self._resize_for_display("DEBUG: Ideal | Actual | ROI", debug_stack, max_dim=1800)
+
+        print("6. Filtering and visualizing anomalies...")
+        visualization_img = self.original_cv_image.copy()
+        cv2.polylines(visualization_img, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
+        
+        # Helper function to process and draw anomalies
+        def process_anomalies(mask, label, color):
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            count = 0
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area > min_pixel_area:
+                    count += 1
+                    M = cv2.moments(c)
+                    cx, cy = (0,0)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                    
+                    cv2.drawContours(visualization_img, [c], -1, color, -1)
+                    label_text = f"{label} (Area: {area:.0f})"
+                    cv2.putText(visualization_img, label_text, (cx - 70, cy + 5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            return count
+
+        found_extra = process_anomalies(extra_feature_mask, "Extra Feature", (255, 0, 255))
+        found_missing = process_anomalies(missing_feature_mask, "Missing Feature", (255, 100, 0))
+
+        self.update_image_display(visualization_img)
+        total = found_extra + found_missing
+        messagebox.showinfo("Inspection Complete", 
+                            f"Found {total} total anomalies:\n"
+                            f"- {found_extra} Extra Features\n"
+                            f"- {found_missing} Missing Features")
+        print(f"--- Anomaly Detection Complete ---")
+        
+    def run_alignment_and_inspection(self):
+        print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
+        transform_matrix = self.align_with_moments_icp_pipeline()
+        if transform_matrix is None:
+            messagebox.showerror("Alignment Error", "Could not compute the transformation matrix.")
+            self.last_transform_matrix = None
+            return
+        
+        self.last_transform_matrix = transform_matrix
+        self.last_transform_type = 'affine'
+        
+        result_image = self.original_cv_image.copy()
+        transformed_outline = cv2.transform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
+        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
+        for hole in self.cad_features['holes']:
+            if hole.size > 0:
+                transformed_hole = cv2.transform(hole.reshape(-1,1,2), transform_matrix)
+                cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
+        for crease in self.cad_features['creases']:
+            if crease.size > 0:
+                transformed_crease = cv2.transform(crease.reshape(-1,1,2), transform_matrix)
+                cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
+        
+        self.update_image_display(result_image)
+        messagebox.showinfo("Inspection Complete", "DXF features aligned using the Affine (Moments+ICP) pipeline.")
+
+    def run_homography_inspection(self):
+        print("\n--- Starting Smart Homography Alignment ---")
+        homography_matrix, method_used = self.align_with_homography_pipeline()
+        
+        if homography_matrix is None:
+            messagebox.showerror("Alignment Error", "Could not compute the homography matrix.")
+            self.last_transform_matrix = None
+            return
+
+        self.last_transform_matrix = homography_matrix
+        self.last_transform_type = 'homography'
+
+        result_image = self.original_cv_image.copy()
+        transformed_outline = cv2.perspectiveTransform(self.cad_features['outline'].reshape(-1, 1, 2), homography_matrix)
+        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
+        for hole in self.cad_features['holes']:
+            if hole.size > 0:
+                transformed_hole = cv2.perspectiveTransform(hole.reshape(-1,1,2), homography_matrix)
+                cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
+        for crease in self.cad_features['creases']:
+            if crease.size > 0:
+                transformed_crease = cv2.perspectiveTransform(crease.reshape(-1,1,2), homography_matrix)
+                cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
+
+        self.update_image_display(result_image)
+        messagebox.showinfo("Inspection Complete", f"DXF features aligned using the {method_used} method.")
+        
     def _check_files_loaded(self):
         all_loaded = self.image_path is not None and self.dxf_path is not None and self.cad_features['outline'].size > 0
         state = tk.NORMAL if all_loaded else tk.DISABLED
@@ -246,7 +368,6 @@ class InspectionApp:
         self.image_label.config(image=self.tk_image)
         
     def _extract_entity_points(self, entity):
-        # This function remains unchanged
         points = []
         dxf_type = entity.dxftype()
         try:
@@ -265,7 +386,6 @@ class InspectionApp:
         return points
 
     def _assemble_paths(self, segments):
-        # This function remains unchanged
         if not segments: return []
         paths = []
         tolerance = 1e-6
@@ -304,145 +424,7 @@ class InspectionApp:
         self.last_transform_matrix = None
         self._check_files_loaded()
 
-    def run_anomaly_detection(self):
-        """
-        Finds and visualizes defects by comparing the image to the last known alignment.
-        """
-        print("\n--- Starting Anomaly Detection ---")
-        
-        if self.last_transform_matrix is None:
-            messagebox.showerror("Prerequisite Error", "You must run an alignment ('Align Affine' or 'Align Homography') before finding anomalies.")
-            return
-
-        print(f"1. Using pre-calculated '{self.last_transform_type}' alignment.")
-        transform_matrix = self.last_transform_matrix
-        h, w = self.original_cv_image.shape[:2]
-
-        print("2. Generating 'Ideal Mask' from aligned DXF...")
-        dxf_mask = np.zeros((h, w), dtype=np.uint8)
-
-        if self.last_transform_type == 'affine':
-            transformed_outline = cv2.transform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
-            cv2.drawContours(dxf_mask, [transformed_outline.astype(np.int32)], -1, 255, cv2.FILLED)
-            for hole in self.cad_features['holes']:
-                if hole.size > 0:
-                    transformed_hole = cv2.transform(hole.reshape(-1, 1, 2), transform_matrix)
-                    cv2.drawContours(dxf_mask, [transformed_hole.astype(np.int32)], -1, 0, cv2.FILLED)
-        else:  # 'homography'
-            transformed_outline = cv2.perspectiveTransform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
-            cv2.drawContours(dxf_mask, [transformed_outline.astype(np.int32)], -1, 255, cv2.FILLED)
-            for hole in self.cad_features['holes']:
-                if hole.size > 0:
-                    transformed_hole = cv2.perspectiveTransform(hole.reshape(-1, 1, 2), transform_matrix)
-                    cv2.drawContours(dxf_mask, [transformed_hole.astype(np.int32)], -1, 0, cv2.FILLED)
-
-        print("3. Generating 'Actual Mask' and ROI from image contours...")
-        image_contours = self.find_image_contours_with_holes(self.original_cv_image)
-        if not image_contours:
-            messagebox.showerror("Detection Error", "Could not find any object contours in the image.")
-            return
-            
-        image_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(image_mask, image_contours, -1, 255, cv2.FILLED)
-        
-        main_part_contour = max(image_contours, key=cv2.contourArea)
-        roi_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(roi_mask, [main_part_contour], -1, 255, cv2.FILLED)
-
-        print("4. Subtracting masks and applying ROI to find anomalies...")
-        anomaly_mask = cv2.subtract(image_mask, dxf_mask)
-        anomaly_mask = cv2.bitwise_and(anomaly_mask, roi_mask)
-
-        print("5. Filtering and classifying found anomalies...")
-        anomaly_contours, _ = cv2.findContours(anomaly_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        visualization_img = self.original_cv_image.copy()
-        cv2.polylines(visualization_img, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
-        
-        MIN_ANOMALY_AREA = int(self.area_slider.get())
-        HOLE_SENSITIVITY = int(self.hole_sensitivity_slider.get())
-        found_anomalies = 0
-
-        for anomaly in anomaly_contours:
-            if cv2.contourArea(anomaly) > MIN_ANOMALY_AREA:
-                found_anomalies += 1
-                M = cv2.moments(anomaly)
-                if M["m00"] == 0: continue
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                
-                dist = cv2.pointPolygonTest(transformed_outline.astype(np.int32), (cx, cy), True)
-                
-                if dist > HOLE_SENSITIVITY:
-                    label = "Extra Hole"
-                else:
-                    label = "Outline Defect"
-                
-                cv2.drawContours(visualization_img, [anomaly], -1, (255, 0, 255), -1)
-                cv2.putText(visualization_img, label, (cx - 40, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-        self.update_image_display(visualization_img)
-        messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} significant anomalies based on current settings.")
-        print(f"--- Anomaly Detection Complete. Found {found_anomalies} anomalies. ---")
-
-    def run_alignment_and_inspection(self):
-        print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
-        transform_matrix = self.align_with_moments_icp_pipeline()
-        if transform_matrix is None:
-            messagebox.showerror("Alignment Error", "Could not compute the transformation matrix.")
-            self.last_transform_matrix = None
-            return
-        
-        # MODIFICATION: Store the successful transform
-        self.last_transform_matrix = transform_matrix
-        self.last_transform_type = 'affine'
-        
-        result_image = self.original_cv_image.copy()
-        transformed_outline = cv2.transform(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
-        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
-        # ... (rest of visualization remains the same)
-        for hole in self.cad_features['holes']:
-            transformed_hole = cv2.transform(hole.reshape(-1,1,2), transform_matrix)
-            cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
-        for crease in self.cad_features['creases']:
-            transformed_crease = cv2.transform(crease.reshape(-1,1,2), transform_matrix)
-            cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
-        
-        self.update_image_display(result_image)
-        messagebox.showinfo("Inspection Complete", "The DXF features have been aligned using the Affine (Moments+ICP) pipeline.")
-        print("--- Inspection Complete ---")
-
-    def run_homography_inspection(self):
-        print("\n--- Starting Smart Homography Alignment ---")
-        homography_matrix, method_used = self.align_with_homography_pipeline()
-        
-        if homography_matrix is None:
-            messagebox.showerror("Alignment Error", "Could not compute the homography matrix.")
-            self.last_transform_matrix = None
-            return
-
-        # MODIFICATION: Store the successful transform
-        self.last_transform_matrix = homography_matrix
-        self.last_transform_type = 'homography' # It's always a 3x3 matrix from this pipeline
-
-        result_image = self.original_cv_image.copy()
-        transformed_outline = cv2.perspectiveTransform(self.cad_features['outline'].reshape(-1, 1, 2), homography_matrix)
-        cv2.polylines(result_image, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
-        # ... (rest of visualization remains the same)
-        for hole in self.cad_features['holes']:
-            transformed_hole = cv2.perspectiveTransform(hole.reshape(-1,1,2), homography_matrix)
-            cv2.polylines(result_image, [transformed_hole.astype(np.int32)], True, (255, 0, 255), 2)
-        for crease in self.cad_features['creases']:
-            transformed_crease = cv2.perspectiveTransform(crease.reshape(-1,1,2), homography_matrix)
-            cv2.polylines(result_image, [transformed_crease.astype(np.int32)], False, (255, 255, 0), 2)
-
-        self.update_image_display(result_image)
-        messagebox.showinfo("Inspection Complete", f"DXF features aligned using the {method_used} method.")
-        print("--- Inspection Complete ---")
-        
-    # ... (All other helper methods like align_with_moments_icp_pipeline, align_with_homography_pipeline, _calculate_alignment_error, etc., remain unchanged) ...
     def align_with_moments_icp_pipeline(self):
-        # This function remains unchanged
         print("1. Preprocessing: Extracting and preparing contours...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
@@ -461,11 +443,7 @@ class InspectionApp:
               print("   Error: Coarse alignment failed on Pass 1.")
               return None
         
-        final_transform_1, final_mse_1 = self._iterative_closest_point(
-            source_points=cad_contour_yflipped,
-            target_points=img_contour,
-            initial_matrix=coarse_transform_1
-        )
+        final_transform_1, final_mse_1 = self._iterative_closest_point(source_points=cad_contour_yflipped, target_points=img_contour, initial_matrix=coarse_transform_1)
         if final_transform_1 is None:
             print("   Error: ICP failed on Pass 1.")
             return None
@@ -477,11 +455,7 @@ class InspectionApp:
             print("   Error: Coarse alignment failed on Pass 2.")
             return None
 
-        final_transform_2, final_mse_2 = self._iterative_closest_point(
-            source_points=cad_contour_original,
-            target_points=img_contour,
-            initial_matrix=coarse_transform_2
-        )
+        final_transform_2, final_mse_2 = self._iterative_closest_point(source_points=cad_contour_original, target_points=img_contour, initial_matrix=coarse_transform_2)
         if final_transform_2 is None:
             print("   Error: ICP failed on Pass 2.")
             return None
@@ -499,7 +473,6 @@ class InspectionApp:
             return final_transform_2
 
     def align_with_homography_pipeline(self):
-        # This function remains unchanged
         print("--- Starting Smart Homography Pipeline (with MSE convergence) ---")
         print("1. Calculating baseline affine transformation...")
         M_affine = self.align_with_moments_icp_pipeline()
@@ -522,25 +495,19 @@ class InspectionApp:
         image_corner_kdtree = KDTree(image_corners)
         previous_mse = affine_mse 
         for i in range(10):
-            print(f"   Iteration {i+1}:")
             cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
             _, indices = image_corner_kdtree.query(cad_corners_transformed)
             src_pts, dst_pts = cad_corners, image_corners[indices]
             next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
             if next_H is None:
-                print("      Warning: findHomography failed. Using previous matrix.")
                 break
             current_mse = self._calculate_alignment_error(cad_contour, img_contour, next_H)
             if current_mse is None:
-                print("      Warning: Could not calculate MSE. Using previous matrix.")
                 break 
-            print(f"      MSE for this iteration: {current_mse:.4f} (Previous best: {previous_mse:.4f})")
             if current_mse >= previous_mse - 1e-6:
-                print("      MSE stopped decreasing. Converged on previous iteration's result.")
                 break 
             current_H = next_H
             previous_mse = current_mse
-        print("   Iterative refinement complete.")
         homography_mse = previous_mse
         print(f"   Final Homography MSE: {homography_mse:.4f}")
         if homography_mse < affine_mse:
@@ -552,15 +519,12 @@ class InspectionApp:
             return final_matrix, "Affine Fallback (MSE did not improve)"
 
     def _calculate_alignment_error(self, source_contour, target_contour, transform_matrix):
-        # This function remains unchanged
-        if source_contour is None or target_contour is None or transform_matrix is None:
-            return None
+        if source_contour is None or target_contour is None or transform_matrix is None: return None
         if transform_matrix.shape == (2, 3):
             transformed_source = cv2.transform(source_contour.reshape(-1, 1, 2), transform_matrix)
         elif transform_matrix.shape == (3, 3):
             transformed_source = cv2.perspectiveTransform(source_contour.reshape(-1, 1, 2), transform_matrix)
-        else:
-            return None
+        else: return None
         transformed_source = transformed_source.reshape(-1, 2)
         target_contour_points = target_contour.reshape(-1, 2)
         try:
@@ -572,14 +536,12 @@ class InspectionApp:
             return None
 
     def _extract_corners(self, contour, epsilon_factor=0.001):
-        # This function remains unchanged
         if contour is None or len(contour) < 3: return None
         epsilon = epsilon_factor * cv2.arcLength(contour, True)
         corners = cv2.approxPolyDP(contour, epsilon, True)
         return corners.reshape(-1, 2) if corners is not None else None
 
     def _align_with_moments(self, cad_contour, img_contour):
-        # This function remains unchanged
         try:
             M_cad = cv2.moments(cad_contour)
             M_img = cv2.moments(img_contour)
@@ -599,7 +561,6 @@ class InspectionApp:
             return None
 
     def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
-        # This function remains unchanged
         if initial_matrix is None: return None, float('inf')
         source_pts, target_pts = source_points.reshape(-1, 2), target_points.reshape(-1, 2)
         if len(source_pts) == 0 or len(target_pts) == 0: return None, float('inf')
@@ -620,7 +581,6 @@ class InspectionApp:
         return current_transform, prev_error
 
     def find_image_contour(self, image):
-        # This function remains unchanged
         if image is None: return None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
@@ -631,7 +591,6 @@ class InspectionApp:
         return largest_contour.astype(np.float32) if largest_contour is not None else None
 
     def find_image_contours_with_holes(self, image):
-        # This function remains unchanged
         if image is None: return None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
@@ -640,7 +599,6 @@ class InspectionApp:
         return contours if contours else None
 
     def run_visualization(self):
-        # This function remains unchanged
         print("--- Running Input Visualization ---")
         if self.cad_features['outline'].size > 0:
             all_points_list = [self.cad_features['outline']] + self.cad_features['holes'] + self.cad_features['creases']
@@ -671,10 +629,9 @@ class InspectionApp:
                 self._resize_for_display("DEBUG: Detected Image Contour", debug_image)
             else:
                 messagebox.showinfo("Visualize", "No contour detected in image with current HSV settings.")
-        messagebox.showinfo("Debug", "Debug windows opened. Press any key on them to close.")
+        messagebox.showinfo("Debug", "Debug windows opened.")
 
     def _resize_for_display(self, window_name, image, max_dim=900):
-        # This function remains unchanged
         h, w = image.shape[:2]
         if max_dim <= 0: max_dim=900
         if h > max_dim or w > max_dim:
@@ -683,6 +640,7 @@ class InspectionApp:
             display_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
         else:
             display_image = image
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
         cv2.imshow(window_name, display_image)
         cv2.waitKey(1)
 
