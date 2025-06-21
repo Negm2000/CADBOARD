@@ -66,6 +66,11 @@ class InspectionApp:
         crease_controls_container.pack(fill=tk.X, pady=(5,0))
         control_frame_4 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_4.pack(fill=tk.X, pady=(5,10))
+        
+        # Add a progress bar for video processing
+        self.progress_bar = ttk.Progressbar(main_frame, orient='horizontal', mode='determinate')
+        self.progress_bar.pack(fill=tk.X, side=tk.TOP, pady=(0, 5))
+        self.progress_bar.pack_forget() # Hide it initially
 
         self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
         self.image_frame.pack(fill=tk.BOTH, expand=True)
@@ -74,7 +79,9 @@ class InspectionApp:
         # Frame 1: Main Buttons
         self.btn_load_image = ttk.Button(control_frame_1, text="1a. Load Image", command=self.load_image)
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
-        self.btn_capture_ids = ttk.Button(control_frame_1, text="1b. Capture IDS", command=self.capture_from_ids)
+        self.btn_load_video = ttk.Button(control_frame_1, text="1b. Load Video", command=self.load_video)
+        self.btn_load_video.pack(side=tk.LEFT, padx=5)
+        self.btn_capture_ids = ttk.Button(control_frame_1, text="1c. Capture IDS", command=self.capture_from_ids)
         self.btn_capture_ids.pack(side=tk.LEFT, padx=5)
         self.btn_load_dxf = ttk.Button(control_frame_1, text="2. Load DXF", command=self.load_dxf)
         self.btn_load_dxf.pack(side=tk.LEFT, padx=(15,5))
@@ -225,6 +232,9 @@ class InspectionApp:
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"], font=('Helvetica', 10))
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
+        # Style for the progress bar
+        style.configure("TProgressbar", troughcolor=self.colors['btn'], background=self.colors['accent'], thickness=10)
+
     
     def run_feature_specific_anomaly_detection(self):
         print("\n--- Starting Full Anomaly Detection ---")
@@ -390,6 +400,184 @@ class InspectionApp:
         except Exception as e:
             messagebox.showerror("Image Load Error", f"Failed to load image: {e}")
             self.reset_image_state()
+
+    def load_video(self):
+        """ NEW: Loads a video and triggers the reconstruction process. """
+        filepath = filedialog.askopenfilename(
+            title="Select a Video File",
+            filetypes=[("Video Files", "*.mp4 *.avi *.mov"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        self.reset_image_state()
+        self.progress_bar.pack(fill=tk.X, side=tk.TOP, pady=(0, 5))
+        self.progress_bar['value'] = 0
+        self.root.update_idletasks()
+
+        try:
+            reconstructed_image = self._reconstruct_from_video(filepath)
+            if reconstructed_image is None:
+                messagebox.showerror("Video Error", "Could not reconstruct image from video. No valid frames found.")
+                return
+
+            self.original_cv_image = reconstructed_image
+            self.cv_image = self.original_cv_image.copy()
+            self.image_path = filepath
+            self.lbl_image_status.config(text=f"Video: {os.path.basename(self.image_path)}")
+            self.update_image_display(self.cv_image)
+            self._check_files_loaded()
+            self.last_transform_matrix = None
+            messagebox.showinfo("Success", "Image reconstructed from video successfully.")
+
+        except Exception as e:
+            messagebox.showerror("Video Processing Error", f"An error occurred: {traceback.format_exc()}")
+            self.reset_image_state()
+        finally:
+            self.progress_bar['value'] = 0
+            self.progress_bar.pack_forget()
+
+    def _reconstruct_from_video(self, video_path):
+        """ NEW: Reconstructs a single image from a video stream using template matching. """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video file: {video_path}")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.progress_bar['maximum'] = total_frames
+
+        full_image = None
+        prev_slice = None
+        processed_frames = 0
+        master_height = None
+        
+        # This counter will help reset if we lose the track for too long
+        consecutive_misses = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            processed_frames += 1
+            self.progress_bar['value'] = processed_frames
+            self.root.update_idletasks()
+
+            current_slice = self._extract_slice_from_frame(frame)
+            if current_slice is None:
+                continue
+
+            if master_height is None:
+                if current_slice.shape[0] > 0:
+                    master_height = current_slice.shape[0]
+                else:
+                    continue
+
+            if current_slice.shape[0] != master_height:
+                current_aspect_ratio = current_slice.shape[1] / current_slice.shape[0]
+                new_width = int(master_height * current_aspect_ratio)
+                if new_width <= 0: continue
+                current_slice = cv2.resize(current_slice, (new_width, master_height), interpolation=cv2.INTER_AREA)
+
+            if full_image is None:
+                full_image = current_slice
+            else:
+                h, w = prev_slice.shape[:2]
+                template_width = min(w - 1, max(20, w // 5)) 
+                if template_width <= 0: 
+                    prev_slice = current_slice # Move on if the prev slice was too thin
+                    continue
+                
+                template = prev_slice[:, w - template_width:]
+
+                if current_slice.shape[1] < template.shape[1]:
+                    continue
+
+                res = cv2.matchTemplate(current_slice, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+                # --- FIX: More tolerant confidence and logic ---
+                if max_val > 0.65: # Lowered threshold slightly
+                    consecutive_misses = 0 # We got a good match, reset the counter
+                    
+                    stitch_x = w - template_width + max_loc[0]
+                    
+                    # The only hard check: the new piece must be forward of the old one
+                    if stitch_x >= w:
+                        continue
+                        
+                    overlap_width = w - stitch_x
+                    if overlap_width <= 0: continue
+
+                    new_part = current_slice[:, overlap_width:]
+                    
+                    if new_part.shape[1] > 0 and full_image.shape[1] > overlap_width:
+                        overlap_region_full = full_image[:, -overlap_width:]
+                        overlap_region_new = current_slice[:, :overlap_width]
+                        
+                        alpha = np.linspace(0, 1, overlap_width)[np.newaxis, :, np.newaxis]
+                        blended_overlap = overlap_region_full * (1 - alpha) + overlap_region_new * alpha
+                        
+                        full_image = np.hstack((full_image[:, :-overlap_width], blended_overlap.astype(np.uint8), new_part))
+                    elif new_part.shape[1] > 0:
+                        full_image = np.hstack((full_image, new_part))
+                else:
+                    # If we fail to get a confident match, increment the miss counter
+                    consecutive_misses += 1
+                    # If we miss too many frames in a row, the object might be gone or the view is bad
+                    # To prevent getting stuck on a bad prev_slice, we can force it to update.
+                    if consecutive_misses > 10:
+                        # This will cause the next good frame to start a new "full_image"
+                        # Or, for a more continuous attempt, just update the slice and reset misses
+                        prev_slice = current_slice
+                        consecutive_misses = 0
+                        continue # Skip stitching for this frame
+            
+            prev_slice = current_slice
+
+        cap.release()
+        return full_image
+
+    def _extract_slice_from_frame(self, frame):
+        """ NEW: Helper to get the cardboard slice from a single video frame. """
+        if frame is None: return None
+
+        # --- FIX: Add constants for better slice validation ---
+        MIN_SLICE_HEIGHT = 50  # The detected slice must be at least 50 pixels tall
+        MIN_ASPECT_RATIO = 1.2 # The slice should be taller than it is wide
+
+        # Uses the same logic as find_image_contour but returns the cropped region
+        hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
+        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
+        
+        # Clean up mask
+        kernel = np.ones((5,5), np.uint8)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
+
+        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: return None
+        
+        largest_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_contour) < 1000: return None
+        
+        x, y, w, h = cv2.boundingRect(largest_contour)
+
+        # --- FIX: Add new validation checks for the slice's shape ---
+        if h < MIN_SLICE_HEIGHT:
+            return None # Reject slices that are too short
+        
+        # Ensure width is not zero to avoid division errors
+        if w == 0:
+            return None
+
+        # Reject slices that are not taller than they are wide (adjust ratio as needed)
+        if (h / w) < MIN_ASPECT_RATIO:
+            return None
+        
+        return frame[y:y+h, x:x+w]
+
 
     def capture_from_ids(self):
         h_cam = ueye.HIDS(0) 
