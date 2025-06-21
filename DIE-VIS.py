@@ -34,16 +34,17 @@ class InspectionApp:
         self.image_path = None
         self.dxf_path = None
         self.cv_image = None
-        self.original_cv_image = None 
+        self.original_cv_image = None
         self.cad_features = {'outline': np.array([]), 'holes': [], 'creases': []}
         self.last_transform_matrix = None
         self.last_transform_type = None
         self.settings_file = "settings.json"
-        
+
         # --- UI Colors and Styles ---
         self.colors = {
             "bg": "#2E2E2E", "fg": "#FFFFFF", "btn": "#4A4A4A",
-            "btn_active": "#5A5A5A", "accent": "#00AACC", "accent_fg": "#FFFFFF"
+            "btn_active": "#5A5A5A", "accent": "#00AACC", "accent_fg": "#FFFFFF",
+            "pass_fill": (0, 200, 0, 80), "fail_fill": (220, 30, 30, 90)
         }
         self.root.configure(bg=self.colors["bg"])
         self.setup_styles()
@@ -54,23 +55,23 @@ class InspectionApp:
 
         top_controls_frame = tk.Frame(main_frame, bg=self.colors["bg"])
         top_controls_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 10))
-        
+
         control_frame_1 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_1.pack(fill=tk.X, pady=(0, 5))
         control_frame_2 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_2.pack(fill=tk.X, pady=(0, 5))
         control_frame_3 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_3.pack(fill=tk.X, pady=(0, 5))
-        control_frame_crease = tk.Frame(top_controls_frame, bg=self.colors["bg"])
-        control_frame_crease.pack(fill=tk.X, pady=(0,5))
+        crease_controls_container = tk.Frame(top_controls_frame, bg=self.colors["bg"])
+        crease_controls_container.pack(fill=tk.X, pady=(5,0))
         control_frame_4 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_4.pack(fill=tk.X, pady=(5,10))
-        
+
         self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
         self.image_frame.pack(fill=tk.BOTH, expand=True)
 
         # --- Populate Control Widgets ---
-        # Frame 1: Buttons
+        # Frame 1: Main Buttons
         self.btn_load_image = ttk.Button(control_frame_1, text="1a. Load Image", command=self.load_image)
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
         self.btn_capture_ids = ttk.Button(control_frame_1, text="1b. Capture IDS", command=self.capture_from_ids)
@@ -85,6 +86,13 @@ class InspectionApp:
         self.btn_inspect_homography.pack(side=tk.LEFT, padx=5)
         self.btn_find_anomalies = ttk.Button(control_frame_1, text="Find Anomalies", state=tk.DISABLED, command=self.run_feature_specific_anomaly_detection, style="Accent.TButton")
         self.btn_find_anomalies.pack(side=tk.LEFT, padx=(15, 5))
+        
+        self.debug_mode = tk.BooleanVar()
+        self.chk_debug = tk.Checkbutton(control_frame_1, text="Debug", variable=self.debug_mode, 
+                                        bg=self.colors["bg"], fg=self.colors["fg"], 
+                                        selectcolor=self.colors["btn"], activebackground=self.colors["bg"],
+                                        activeforeground=self.colors["fg"], highlightthickness=0)
+        self.chk_debug.pack(side=tk.RIGHT, padx=(0, 5))
         
         # Frame 2: Hole and Missing Material Tolerances
         self.lbl_hole_tolerance = tk.Label(control_frame_2, text="Hole Occlusion Tol (%):", bg=self.colors["bg"], fg=self.colors["fg"])
@@ -103,7 +111,7 @@ class InspectionApp:
         self.lbl_missing_tol_val = tk.Label(control_frame_2, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
         self.lbl_missing_tol_val.pack(side=tk.LEFT, padx=5)
 
-        # Frame 3: Extra Material Tolerance and Debug
+        # Frame 3: Extra Material Tolerance
         self.lbl_extra_tolerance = tk.Label(control_frame_3, text="Extra Mat. Tol (% Diag):  ", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_extra_tolerance.pack(side=tk.LEFT, padx=(15, 5))
         self.extra_material_tolerance_var = tk.DoubleVar(value=0.5)
@@ -111,47 +119,33 @@ class InspectionApp:
         self.extra_tolerance_slider.pack(side=tk.LEFT, padx=5)
         self.lbl_extra_tol_val = tk.Label(control_frame_3, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
         self.lbl_extra_tol_val.pack(side=tk.LEFT, padx=(0, 20))
-        
-        self.debug_mode = tk.BooleanVar()
-        self.chk_debug = tk.Checkbutton(control_frame_3, text="Debug Mode", variable=self.debug_mode, 
-                                        bg=self.colors["bg"], fg=self.colors["fg"], 
-                                        selectcolor=self.colors["btn"], activebackground=self.colors["bg"],
-                                        activeforeground=self.colors["fg"], highlightthickness=0)
-        self.chk_debug.pack(side=tk.LEFT, padx=(142, 5))
 
-        # --- Crease Controls Frame (REPURPOSED FOR CANNY) ---
-        self.lbl_crease_low = tk.Label(control_frame_crease, text="Canny Low Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_crease_low.pack(side=tk.LEFT, padx=(15,5))
-        self.crease_low_thresh_var = tk.IntVar(value=50) # Adjusted default for Canny
-        self.crease_low_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_low_thresh_var, command=self._update_slider_labels)
-        self.crease_low_thresh_slider.pack(side=tk.LEFT, padx=5)
-        self.lbl_crease_low_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
-        self.lbl_crease_low_val.pack(side=tk.LEFT, padx=(0,10))
+        # Crease Controls (Adaptive Threshold Method)
+        self.lbl_block_size = tk.Label(crease_controls_container, text="Adaptive Block Size:", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_block_size.pack(side=tk.LEFT, padx=(15,5))
+        self.block_size_var = tk.IntVar(value=25)
+        self.block_size_slider = ttk.Scale(crease_controls_container, from_=3, to=101, orient=tk.HORIZONTAL, length=120, command=self._update_block_size)
+        self.block_size_slider.set(25)
+        self.block_size_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_block_size_val = tk.Label(crease_controls_container, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
+        self.lbl_block_size_val.pack(side=tk.LEFT, padx=(0,10))
         
-        self.lbl_crease_high = tk.Label(control_frame_crease, text="Canny High Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_crease_high.pack(side=tk.LEFT, padx=(10,5))
-        self.crease_high_thresh_var = tk.IntVar(value=150) # Adjusted default for Canny
-        self.crease_high_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_high_thresh_var, command=self._update_slider_labels)
-        self.crease_high_thresh_slider.pack(side=tk.LEFT, padx=5)
-        self.lbl_crease_high_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
-        self.lbl_crease_high_val.pack(side=tk.LEFT, padx=(0,10))
+        self.lbl_c_constant = tk.Label(crease_controls_container, text="Sensitivity (C):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_c_constant.pack(side=tk.LEFT, padx=(10,5))
+        self.c_constant_var = tk.IntVar(value=7)
+        self.c_constant_slider = ttk.Scale(crease_controls_container, from_=1, to=30, orient=tk.HORIZONTAL, length=120, variable=self.c_constant_var, command=self._update_slider_labels)
+        self.c_constant_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_c_constant_val = tk.Label(crease_controls_container, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
+        self.lbl_c_constant_val.pack(side=tk.LEFT, padx=(0,10))
 
-        self.lbl_crease_search_width = tk.Label(control_frame_crease, text="Crease Search Width (px):", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_crease_search_width.pack(side=tk.LEFT, padx=(10,5))
-        self.crease_search_width_var = tk.IntVar(value=5)
-        self.crease_search_width_slider = ttk.Scale(control_frame_crease, from_=1, to=25, orient=tk.HORIZONTAL, length=100, variable=self.crease_search_width_var, command=self._update_slider_labels)
-        self.crease_search_width_slider.pack(side=tk.LEFT, padx=5)
-        self.lbl_crease_search_width_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
-        self.lbl_crease_search_width_val.pack(side=tk.LEFT, padx=(0,10))
-        
-        self.lbl_crease_density = tk.Label(control_frame_crease, text="Min Crease Density (%):", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_crease_density.pack(side=tk.LEFT, padx=(10,5))
-        self.min_crease_density_var = tk.DoubleVar(value=80.0) # Renamed and adjusted default
-        self.min_crease_density_slider = ttk.Scale(control_frame_crease, from_=1, to=200, orient=tk.HORIZONTAL, length=100, variable=self.min_crease_density_var, command=self._update_slider_labels)
-        self.min_crease_density_slider.pack(side=tk.LEFT, padx=5)
-        self.lbl_crease_density_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
-        self.lbl_crease_density_val.pack(side=tk.LEFT, padx=0)
-        
+        self.lbl_crease_fill = tk.Label(crease_controls_container, text="Min Crease Fill (%):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_fill.pack(side=tk.LEFT, padx=(10,5))
+        self.min_crease_fill_var = tk.DoubleVar(value=15.0)
+        self.min_crease_fill_slider = ttk.Scale(crease_controls_container, from_=1, to=100, orient=tk.HORIZONTAL, length=120, variable=self.min_crease_fill_var, command=self._update_slider_labels)
+        self.min_crease_fill_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_fill_val = tk.Label(crease_controls_container, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
+        self.lbl_crease_fill_val.pack(side=tk.LEFT, padx=0)
+
         # Frame 4: Status Labels
         self.lbl_image_status = tk.Label(control_frame_4, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
         self.lbl_image_status.pack(side=tk.LEFT)
@@ -162,7 +156,7 @@ class InspectionApp:
         self.image_label = tk.Label(self.image_frame, bg="#000000")
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.image_label.bind("<Configure>", self.on_resize)
-        
+
         self.load_settings()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -171,23 +165,26 @@ class InspectionApp:
         cv2.destroyAllWindows()
         self.root.destroy()
 
+    def _update_block_size(self, val):
+        new_val = int(float(val))
+        if new_val % 2 == 0: new_val += 1
+        self.block_size_var.set(new_val)
+        self._update_slider_labels()
+
     def save_settings(self):
         settings = {
             "hole_occlusion_tolerance": self.hole_occlusion_tolerance_var.get(),
             "missing_material_tolerance": self.missing_material_tolerance_var.get(),
             "extra_material_tolerance": self.extra_material_tolerance_var.get(),
-            "crease_low_thresh": self.crease_low_thresh_var.get(),
-            "crease_high_thresh": self.crease_high_thresh_var.get(),
-            "crease_search_width": self.crease_search_width_var.get(),
-            "min_crease_density": self.min_crease_density_var.get(),
+            "block_size": self.block_size_var.get(),
+            "c_constant": self.c_constant_var.get(),
+            "min_crease_fill": self.min_crease_fill_var.get(),
             "debug_mode": self.debug_mode.get()
         }
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump(settings, f, indent=4)
-            print("Settings saved successfully.")
-        except Exception as e:
-            print(f"Error saving settings: {e}")
+        except Exception as e: print(f"Error saving settings: {e}")
 
     def load_settings(self):
         try:
@@ -197,12 +194,11 @@ class InspectionApp:
                     self.hole_occlusion_tolerance_var.set(settings.get("hole_occlusion_tolerance", 10.0))
                     self.missing_material_tolerance_var.set(settings.get("missing_material_tolerance", 0.5))
                     self.extra_material_tolerance_var.set(settings.get("extra_material_tolerance", 0.5))
-                    self.crease_low_thresh_var.set(settings.get("crease_low_thresh", 50))
-                    self.crease_high_thresh_var.set(settings.get("crease_high_thresh", 150))
-                    self.crease_search_width_var.set(settings.get("crease_search_width", 5))
-                    self.min_crease_density_var.set(settings.get("min_crease_density", 80.0))
+                    self.block_size_var.set(settings.get("block_size", 25))
+                    self.block_size_slider.set(self.block_size_var.get())
+                    self.c_constant_var.set(settings.get("c_constant", 7))
+                    self.min_crease_fill_var.set(settings.get("min_crease_fill", 15.0))
                     self.debug_mode.set(settings.get("debug_mode", False))
-                    print("Settings loaded successfully.")
         except Exception as e:
             print(f"Error loading settings, using defaults. Error: {e}")
         finally:
@@ -212,10 +208,9 @@ class InspectionApp:
         self.lbl_hole_occlusion_val.config(text=f"{self.hole_occlusion_tolerance_var.get():.1f}%")
         self.lbl_missing_tol_val.config(text=f"{self.missing_material_tolerance_var.get():.1f}%")
         self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
-        self.lbl_crease_low_val.config(text=f"{self.crease_low_thresh_var.get()}")
-        self.lbl_crease_high_val.config(text=f"{self.crease_high_thresh_var.get()}")
-        self.lbl_crease_search_width_val.config(text=f"{self.crease_search_width_var.get()}px")
-        self.lbl_crease_density_val.config(text=f"{self.min_crease_density_var.get():.1f}%")
+        self.lbl_block_size_val.config(text=f"{self.block_size_var.get()}")
+        self.lbl_c_constant_val.config(text=f"{self.c_constant_var.get()}")
+        self.lbl_crease_fill_val.config(text=f"{self.min_crease_fill_var.get():.1f}%")
         
     def setup_styles(self):
         style = ttk.Style()
@@ -237,11 +232,14 @@ class InspectionApp:
         h, w = self.original_cv_image.shape[:2]
         transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
         visualization_img = self.original_cv_image.copy()
-        found_anomalies = 0
-        
+        total_anomalies = 0
+
+        # Create a transparent overlay for clean crease visuals
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+
         # --- 1. SETUP MASKS AND ALIGNED FEATURES ---
         raw_image_mask = np.zeros((h, w), dtype=np.uint8)
-        image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
+        image_contours_raw, hierarchy = self.find_image_contours_with_holes(self.original_cv_image)
         if not image_contours_raw:
             messagebox.showerror("Detection Error", "Could not find any object contours in the image."); return
         cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
@@ -249,39 +247,35 @@ class InspectionApp:
         aligned_cad_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), self.last_transform_matrix)
         aligned_cad_holes = [transform_func(h.reshape(-1, 1, 2), self.last_transform_matrix) for h in self.cad_features['holes']]
         aligned_cad_outline_int = aligned_cad_outline.astype(np.int32)
-
-        cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
-        for hole in aligned_cad_holes:
-            cv2.polylines(visualization_img, [hole.astype(np.int32)], True, (100, 100, 100), 1)
-
+        
         outline_area_mask = np.zeros((h, w), dtype=np.uint8)
         cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
-        
-        # --- 2. OUTLINE AND HOLE DEFECTS ---
-        # (This section remains unchanged)
+
+        # --- 2. OUTLINE, MISSING/EXTRA MATERIAL, AND HOLE DEFECTS ---
+        print(" - Checking for outline, hole, and material defects...")
         cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
-        
         object_diagonal = math.sqrt(w**2 + h**2)
+
+        # Extra Material Check
         extra_tolerance_px = max(1, int(round(object_diagonal * (self.extra_material_tolerance_var.get() / 100.0))))
         kernel_dilate = np.ones((extra_tolerance_px, extra_tolerance_px), np.uint8)
         upper_bound_mask = cv2.dilate(outline_area_mask, kernel_dilate)
-
-        missing_tolerance_px = max(1, int(round(object_diagonal * (self.missing_material_tolerance_var.get() / 100.0))))
-        kernel_erode = np.ones((missing_tolerance_px, missing_tolerance_px), np.uint8)
-        lower_bound_mask = cv2.erode(outline_area_mask, kernel_erode)
-
         extra_material_mask = cv2.subtract(cleaned_physical_mask, upper_bound_mask)
         contours, _ = cv2.findContours(extra_material_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             for contour in contours:
                 if cv2.contourArea(contour) < 4: continue
-                found_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1)
+                total_anomalies += 1
+                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1) # Orange fill for extra material
                 M = cv2.moments(contour)
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
-                    cv2.putText(visualization_img, "Extra Material", (cx - 40, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    cv2.putText(visualization_img, "Extra", (cx - 20, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
+        # Missing Material & Hole Occlusion Check
+        missing_tolerance_px = max(1, int(round(object_diagonal * (self.missing_material_tolerance_var.get() / 100.0))))
+        kernel_erode = np.ones((missing_tolerance_px, missing_tolerance_px), np.uint8)
+        lower_bound_mask = cv2.erode(outline_area_mask, kernel_erode)
         missing_material_mask = cv2.subtract(lower_bound_mask, cleaned_physical_mask)
         all_missing_contours, _ = cv2.findContours(missing_material_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -289,110 +283,95 @@ class InspectionApp:
             processed_contour_indices = set()
             for expected_hole in aligned_cad_holes:
                 total_detected_area_in_hole = 0
-                contours_in_this_hole = []
                 for i, contour in enumerate(all_missing_contours):
                     M = cv2.moments(contour)
                     if M["m00"] == 0: continue
-                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                     if cv2.pointPolygonTest(expected_hole, (float(cx), float(cy)), False) >= 0:
                         total_detected_area_in_hole += cv2.contourArea(contour)
-                        contours_in_this_hole.append(contour)
                         processed_contour_indices.add(i)
 
                 expected_hole_area = cv2.contourArea(expected_hole)
                 presence_ratio = min(1.0, total_detected_area_in_hole / expected_hole_area if expected_hole_area > 0 else 0.0)
                 occlusion_ratio = 1.0 - presence_ratio
-                max_allowed_occlusion = self.hole_occlusion_tolerance_var.get() / 100.0
-
-                if occlusion_ratio > max_allowed_occlusion:
-                    found_anomalies += 1
-                    cv2.drawContours(visualization_img, contours_in_this_hole, -1, (255, 100, 0), -1)
+                if occlusion_ratio > (self.hole_occlusion_tolerance_var.get() / 100.0):
+                    total_anomalies += 1
                     M_hole = cv2.moments(expected_hole)
                     label_cx = int(M_hole["m10"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
                     label_cy = int(M_hole["m01"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
-                    label = f"Hole Occluded ({occlusion_ratio*100:.0f}%)"
+                    cv2.drawContours(visualization_img, [expected_hole.astype(np.int32)], -1, (255, 100, 0), -1) # Blue fill for occluded hole
+                    label = f"Occluded ({occlusion_ratio*100:.0f}%)"
                     cv2.putText(visualization_img, label, (label_cx - 50, label_cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
             
             for i, contour in enumerate(all_missing_contours):
-                if i in processed_contour_indices: continue
-                if cv2.contourArea(contour) < 5: continue
-                found_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1)
+                if i in processed_contour_indices or cv2.contourArea(contour) < 5: continue
+                total_anomalies += 1
+                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1) # Red fill for missing material
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
-                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
-                    cv2.putText(visualization_img, "Missing Material", (cx - 50, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-
-        # --- 3. CREASE DEFECT DETECTION (ROBUST CANNY-BASED METHOD) ---
-        print("\n--- Starting Robust Crease Detection (Canny/ROI Density Method) ---")
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    cv2.putText(visualization_img, "Missing", (cx - 30, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
         
-        # Get parameters from the GUI
-        canny_low = self.crease_low_thresh_var.get()
-        canny_high = self.crease_high_thresh_var.get()
-        search_width = self.crease_search_width_var.get()
-        min_density_ratio = self.min_crease_density_var.get() / 100.0
-
-        # Step 1: Pre-process image and find all edges using Canny
+        # --- 3. CREASE DEFECT DETECTION (ADAPTIVE THRESHOLD METHOD) ---
+        print(" - Checking for crease defects...")
         gray_img = cv2.cvtColor(self.original_cv_image, cv2.COLOR_BGR2GRAY)
         blurred_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
-        canny_edges = cv2.Canny(blurred_img, canny_low, canny_high)
+        block_size = self.block_size_var.get()
+        c_constant = self.c_constant_var.get()
+        min_fill_percent = self.min_crease_fill_var.get()
         
-        if self.debug_mode.get():
-            self._resize_for_display("DEBUG: Canny Edge Map", canny_edges)
+        adaptive_thresh_img = cv2.adaptiveThreshold(blurred_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, c_constant)
 
+        if self.debug_mode.get():
+            self._resize_for_display("DEBUG: Adaptive Threshold Result", adaptive_thresh_img)
+
+        final_labels = []
         for crease in self.cad_features['creases']:
-            if crease.size < 4: continue # Must have at least two points
-            
-            # Transform the CAD crease to its position on the image
+            if crease.size < 4: continue
+
             transformed_crease_float = transform_func(crease.reshape(-1, 1, 2), self.last_transform_matrix)
             transformed_crease_int = transformed_crease_float.astype(np.int32)
+            corridor_width = max(3, int(block_size / 3)) 
+            corridor_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.polylines(corridor_mask, [transformed_crease_int], False, 255, corridor_width)
+            corridor_area = cv2.countNonZero(corridor_mask)
+            if corridor_area == 0: continue
 
-            # Step 2: Create a search corridor (ROI mask) around the expected crease path
-            crease_corridor_mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.polylines(crease_corridor_mask, [transformed_crease_int], False, 255, search_width)
-
-            # Step 3: Find the actual edge pixels that fall within our search corridor
-            detected_edges_in_corridor = cv2.bitwise_and(canny_edges, crease_corridor_mask)
+            detected_pixels_in_corridor = cv2.bitwise_and(adaptive_thresh_img, corridor_mask)
+            fill_factor = (cv2.countNonZero(detected_pixels_in_corridor) / corridor_area) * 100
+            is_ok = fill_factor >= min_fill_percent
             
-            if self.debug_mode.get():
-                 # Create a visual representation of the search
-                 debug_corridor_viz = cv2.cvtColor(crease_corridor_mask, cv2.COLOR_GRAY2BGR)
-                 debug_corridor_viz[detected_edges_in_corridor == 255] = [0,255,0] # Green for detected edges
-                 self._resize_for_display(f"DEBUG: Corridor for Crease", debug_corridor_viz)
+            fill_color = self.colors['pass_fill'] if is_ok else self.colors['fail_fill']
+            cv2.polylines(overlay, [transformed_crease_int], False, fill_color, corridor_width)
 
-
-            # Step 4: Measure the density of detected edges along the crease's path
-            detected_pixels_count = cv2.countNonZero(detected_edges_in_corridor)
-            expected_length = cv2.arcLength(transformed_crease_float, False)
-            
-            if expected_length < 1: continue
-
-            # A Canny edge detector often finds two parallel edges for a crease (one for each side).
-            # So, a density_ratio > 1.0 is possible and indicates a strong crease.
-            density_ratio = detected_pixels_count / expected_length
-            
-            # Step 5: Compare density to the threshold and report anomaly
-            if density_ratio < min_density_ratio:
-                found_anomalies += 1
-                color = (0, 0, 255) # Red for failed crease
+            status = "OK"
+            if not is_ok:
+                total_anomalies += 1
                 status = "Defect"
-            else:
-                color = (255, 128, 0) # Blue for passed crease
-                status = "OK"
-
-            cv2.polylines(visualization_img, [transformed_crease_int], False, color, 2)
             
-            mid_point = transformed_crease_int[len(transformed_crease_int)//2][0]
-            label_pos = tuple(mid_point)
-            label = f"Crease {status} ({density_ratio*100:.0f}%)"
-            cv2.putText(visualization_img, label, (label_pos[0] - 50, label_pos[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+            mid_point = tuple(transformed_crease_int[len(transformed_crease_int)//2][0])
+            label_text = f"Fill: {fill_factor:.0f}% ({status})"
+            final_labels.append((label_text, mid_point, corridor_width))
+
+        # --- 4. FINAL VISUALIZATION ---
+        alpha_mask = cv2.cvtColor(overlay[:, :, 3], cv2.COLOR_GRAY2BGR) / 255.0
+        # Blend the crease overlays with the image that already has material defects drawn on it
+        visualization_img = (visualization_img * (1 - alpha_mask) + overlay[:, :, :3] * alpha_mask).astype(np.uint8)
         
-        # --- FINALIZATION ---
+        # Draw the base CAD outline on top for reference
+        cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
+
+        # Draw the labels last so they are on top
+        for text, pos, width in final_labels:
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            text_pos = (pos[0] - tw // 2, pos[1] - width)
+            cv2.putText(visualization_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 4, cv2.LINE_AA)
+            cv2.putText(visualization_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,255), 1, cv2.LINE_AA)
+
         self.update_image_display(visualization_img)
-        messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} total potential anomalies.")
-        print(f"--- Anomaly Detection Complete: {found_anomalies} issues found. ---")
+        messagebox.showinfo("Inspection Complete", f"Found {total_anomalies} total potential anomalies.")
+        print(f"--- Anomaly Detection Complete: {total_anomalies} issues found. ---")
     
-    # ... (Rest of the unchanged methods) ...
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return
@@ -679,7 +658,7 @@ class InspectionApp:
             cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
             _, indices = image_corner_kdtree.query(cad_corners_transformed)
             src_pts, dst_pts = cad_corners, image_corners[indices]
-            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 20.0)
             if next_H is None:
                 break
             current_mse = self._calculate_alignment_error(cad_contour, img_contour, next_H)
