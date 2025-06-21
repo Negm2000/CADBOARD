@@ -121,11 +121,11 @@ class InspectionApp:
         self.lbl_extra_tol_val.pack(side=tk.LEFT, padx=(0, 20))
 
         # Crease Controls (Adaptive Threshold Method)
+        # CORRECTED Crease Controls Section
         self.lbl_block_size = tk.Label(crease_controls_container, text="Adaptive Block Size:", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_block_size.pack(side=tk.LEFT, padx=(15,5))
         self.block_size_var = tk.IntVar(value=25)
-        self.block_size_slider = ttk.Scale(crease_controls_container, from_=3, to=101, orient=tk.HORIZONTAL, length=120, command=self._update_block_size)
-        self.block_size_slider.set(25)
+        self.block_size_slider = ttk.Scale(crease_controls_container, from_=3, to=101, orient=tk.HORIZONTAL, length=120, variable=self.block_size_var, command=self._update_slider_labels)
         self.block_size_slider.pack(side=tk.LEFT, padx=5)
         self.lbl_block_size_val = tk.Label(crease_controls_container, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
         self.lbl_block_size_val.pack(side=tk.LEFT, padx=(0,10))
@@ -165,11 +165,6 @@ class InspectionApp:
         cv2.destroyAllWindows()
         self.root.destroy()
 
-    def _update_block_size(self, val):
-        new_val = int(float(val))
-        if new_val % 2 == 0: new_val += 1
-        self.block_size_var.set(new_val)
-        self._update_slider_labels()
 
     def save_settings(self):
         settings = {
@@ -204,14 +199,22 @@ class InspectionApp:
         finally:
             self._update_slider_labels()
 
+
+# CORRECTED _update_slider_labels method
     def _update_slider_labels(self, *args):
+        # Enforce odd number for block size
+        block_val = self.block_size_var.get()
+        if block_val % 2 == 0:
+            self.block_size_var.set(block_val + 1)
+            
+        # This function now correctly updates ALL labels
         self.lbl_hole_occlusion_val.config(text=f"{self.hole_occlusion_tolerance_var.get():.1f}%")
         self.lbl_missing_tol_val.config(text=f"{self.missing_material_tolerance_var.get():.1f}%")
         self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
         self.lbl_block_size_val.config(text=f"{self.block_size_var.get()}")
         self.lbl_c_constant_val.config(text=f"{self.c_constant_var.get()}")
         self.lbl_crease_fill_val.config(text=f"{self.min_crease_fill_var.get():.1f}%")
-        
+            
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use('clam')
@@ -658,7 +661,7 @@ class InspectionApp:
             cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
             _, indices = image_corner_kdtree.query(cad_corners_transformed)
             src_pts, dst_pts = cad_corners, image_corners[indices]
-            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 20.0)
+            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 10.0)
             if next_H is None:
                 break
             current_mse = self._calculate_alignment_error(cad_contour, img_contour, next_H)

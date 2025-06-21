@@ -4,6 +4,6 @@
     "extra_material_tolerance": 0.7533333333333333,
     "block_size": 61,
     "c_constant": 7,
-    "min_crease_fill": 10.0,
+    "min_crease_fill": 11.0,
     "debug_mode": false
 }
