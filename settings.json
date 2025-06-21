@@ -1,6 +1,6 @@
 {
-    "hole_occlusion_tolerance": 12.433333333333334,
-    "missing_material_tolerance": 0.6716666666666667,
-    "extra_material_tolerance": 0.7125,
+    "hole_occlusion_tolerance": 80.0,
+    "missing_material_tolerance": 0.835,
+    "extra_material_tolerance": 0.7941666666666667,
     "debug_mode": false
 }

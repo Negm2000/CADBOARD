@@ -28,7 +28,7 @@ class InspectionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Geometric Engine)")
-        self.root.geometry("1300x900")
+        self.root.geometry("1300x950") # Increased height for new controls
 
         # --- State Variables ---
         self.image_path = None
@@ -57,13 +57,12 @@ class InspectionApp:
         
         control_frame_1 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_1.pack(fill=tk.X, pady=(0, 5))
-        
         control_frame_2 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_2.pack(fill=tk.X, pady=(0, 5))
-        
         control_frame_3 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_3.pack(fill=tk.X, pady=(0, 5))
-        
+        control_frame_crease = tk.Frame(top_controls_frame, bg=self.colors["bg"])
+        control_frame_crease.pack(fill=tk.X, pady=(0,5))
         control_frame_4 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_4.pack(fill=tk.X, pady=(5,10))
         
@@ -119,6 +118,31 @@ class InspectionApp:
                                         selectcolor=self.colors["btn"], activebackground=self.colors["bg"],
                                         activeforeground=self.colors["fg"], highlightthickness=0)
         self.chk_debug.pack(side=tk.LEFT, padx=(142, 5))
+
+        # Crease Controls Frame
+        self.lbl_crease_low = tk.Label(control_frame_crease, text="Crease Low Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_low.pack(side=tk.LEFT, padx=(15,5))
+        self.crease_low_thresh_var = tk.IntVar(value=10)
+        self.crease_low_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_low_thresh_var, command=self._update_slider_labels)
+        self.crease_low_thresh_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_low_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
+        self.lbl_crease_low_val.pack(side=tk.LEFT, padx=(0,10))
+        
+        self.lbl_crease_high = tk.Label(control_frame_crease, text="Crease High Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_high.pack(side=tk.LEFT, padx=(10,5))
+        self.crease_high_thresh_var = tk.IntVar(value=100)
+        self.crease_high_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_high_thresh_var, command=self._update_slider_labels)
+        self.crease_high_thresh_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_high_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
+        self.lbl_crease_high_val.pack(side=tk.LEFT, padx=(0,10))
+
+        self.lbl_crease_presence = tk.Label(control_frame_crease, text="Min Crease Presence (%):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_presence.pack(side=tk.LEFT, padx=(10,5))
+        self.min_crease_presence_var = tk.DoubleVar(value=50.0)
+        self.min_crease_presence_slider = ttk.Scale(control_frame_crease, from_=1, to=99, orient=tk.HORIZONTAL, length=100, variable=self.min_crease_presence_var, command=self._update_slider_labels)
+        self.min_crease_presence_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_presence_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
+        self.lbl_crease_presence_val.pack(side=tk.LEFT, padx=0)
         
         # Frame 4: Status Labels
         self.lbl_image_status = tk.Label(control_frame_4, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
@@ -131,22 +155,22 @@ class InspectionApp:
         self.image_label.pack(fill=tk.BOTH, expand=True)
         self.image_label.bind("<Configure>", self.on_resize)
         
-        # --- Load Settings and Set Closing Protocol ---
         self.load_settings()
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
     def _on_closing(self):
-        """Handle saving settings and gracefully closing the application."""
         self.save_settings()
         cv2.destroyAllWindows()
         self.root.destroy()
 
     def save_settings(self):
-        """Saves current slider and checkbox values to a JSON file."""
         settings = {
             "hole_occlusion_tolerance": self.hole_occlusion_tolerance_var.get(),
             "missing_material_tolerance": self.missing_material_tolerance_var.get(),
             "extra_material_tolerance": self.extra_material_tolerance_var.get(),
+            "crease_low_thresh": self.crease_low_thresh_var.get(),
+            "crease_high_thresh": self.crease_high_thresh_var.get(),
+            "min_crease_presence": self.min_crease_presence_var.get(),
             "debug_mode": self.debug_mode.get()
         }
         try:
@@ -157,7 +181,6 @@ class InspectionApp:
             print(f"Error saving settings: {e}")
 
     def load_settings(self):
-        """Loads settings from JSON file if it exists."""
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r') as f:
@@ -165,6 +188,9 @@ class InspectionApp:
                     self.hole_occlusion_tolerance_var.set(settings.get("hole_occlusion_tolerance", 10.0))
                     self.missing_material_tolerance_var.set(settings.get("missing_material_tolerance", 0.5))
                     self.extra_material_tolerance_var.set(settings.get("extra_material_tolerance", 0.5))
+                    self.crease_low_thresh_var.set(settings.get("crease_low_thresh", 10))
+                    self.crease_high_thresh_var.set(settings.get("crease_high_thresh", 100))
+                    self.min_crease_presence_var.set(settings.get("min_crease_presence", 50.0))
                     self.debug_mode.set(settings.get("debug_mode", False))
                     print("Settings loaded successfully.")
         except Exception as e:
@@ -173,12 +199,12 @@ class InspectionApp:
             self._update_slider_labels()
 
     def _update_slider_labels(self, *args):
-        hole_val = self.hole_occlusion_tolerance_var.get()
-        self.lbl_hole_occlusion_val.config(text=f"{hole_val:.1f}%")
-        missing_val = self.missing_material_tolerance_var.get()
-        self.lbl_missing_tol_val.config(text=f"{missing_val:.1f}%")
-        extra_val = self.extra_material_tolerance_var.get()
-        self.lbl_extra_tol_val.config(text=f"{extra_val:.1f}%")
+        self.lbl_hole_occlusion_val.config(text=f"{self.hole_occlusion_tolerance_var.get():.1f}%")
+        self.lbl_missing_tol_val.config(text=f"{self.missing_material_tolerance_var.get():.1f}%")
+        self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
+        self.lbl_crease_low_val.config(text=f"{self.crease_low_thresh_var.get()}")
+        self.lbl_crease_high_val.config(text=f"{self.crease_high_thresh_var.get()}")
+        self.lbl_crease_presence_val.config(text=f"{self.min_crease_presence_var.get():.1f}%")
         
     def setup_styles(self):
         style = ttk.Style()
@@ -191,6 +217,183 @@ class InspectionApp:
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"], font=('Helvetica', 10))
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
 
+    def _detect_crease_transitions(self, image, low_thresh, high_thresh, scan_type='rows'):
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        if scan_type == 'columns':
+            gray_image = cv2.transpose(gray_image)
+
+        h, w = gray_image.shape
+        crease_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for i in range(h):
+            start, down, up = False, False, False
+            pre_val, pre_coord = 0, 0
+            for j in range(w - 1):
+                p1 = int(gray_image[i, j])
+                p2 = int(gray_image[i, j + 1])
+
+                if p1 > p2: # Downward transition
+                    if not start:
+                        start, down, pre_val, pre_coord = True, True, p1, j
+                    elif up:
+                        delta = abs(pre_val - p1)
+                        if low_thresh <= delta <= high_thresh:
+                            crease_mask[i, (j + pre_coord) // 2] = 255
+                        up, down, pre_val, pre_coord = False, True, p1, j
+                elif p1 < p2: # Upward transition
+                    if not start:
+                        start, up, pre_val, pre_coord = True, True, p1, j
+                    elif down:
+                        delta = abs(pre_val - p1)
+                        if low_thresh <= delta <= high_thresh:
+                            crease_mask[i, (j + pre_coord) // 2] = 255
+                        down, up, pre_val, pre_coord = False, True, p1, j
+        
+        return cv2.transpose(crease_mask) if scan_type == 'columns' else crease_mask
+
+    def run_feature_specific_anomaly_detection(self):
+        print("\n--- Starting Full Anomaly Detection ---")
+        if self.last_transform_matrix is None or self.original_cv_image is None:
+            messagebox.showerror("Prerequisite Error", "Image must be loaded and aligned first.")
+            return
+
+        h, w = self.original_cv_image.shape[:2]
+        transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
+        visualization_img = self.original_cv_image.copy()
+        found_anomalies = 0
+        
+        # --- 1. SETUP MASKS AND ALIGNED FEATURES ---
+        raw_image_mask = np.zeros((h, w), dtype=np.uint8)
+        image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
+        if not image_contours_raw:
+            messagebox.showerror("Detection Error", "Could not find any object contours in the image."); return
+        cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
+
+        aligned_cad_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), self.last_transform_matrix)
+        aligned_cad_holes = [transform_func(h.reshape(-1, 1, 2), self.last_transform_matrix) for h in self.cad_features['holes']]
+        aligned_cad_outline_int = aligned_cad_outline.astype(np.int32)
+
+        cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
+        for hole in aligned_cad_holes:
+            cv2.polylines(visualization_img, [hole.astype(np.int32)], True, (100, 100, 100), 1)
+
+        outline_area_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
+        
+        # --- 2. OUTLINE AND HOLE DEFECTS ---
+        cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
+        
+        object_diagonal = math.sqrt(w**2 + h**2)
+        extra_tolerance_px = max(1, int(round(object_diagonal * (self.extra_material_tolerance_var.get() / 100.0))))
+        kernel_dilate = np.ones((extra_tolerance_px, extra_tolerance_px), np.uint8)
+        upper_bound_mask = cv2.dilate(outline_area_mask, kernel_dilate)
+
+        missing_tolerance_px = max(1, int(round(object_diagonal * (self.missing_material_tolerance_var.get() / 100.0))))
+        kernel_erode = np.ones((missing_tolerance_px, missing_tolerance_px), np.uint8)
+        lower_bound_mask = cv2.erode(outline_area_mask, kernel_erode)
+
+        extra_material_mask = cv2.subtract(cleaned_physical_mask, upper_bound_mask)
+        contours, _ = cv2.findContours(extra_material_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            for contour in contours:
+                if cv2.contourArea(contour) < 4: continue
+                found_anomalies += 1
+                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1)
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
+                    cv2.putText(visualization_img, "Extra Material", (cx - 40, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+        missing_material_mask = cv2.subtract(lower_bound_mask, cleaned_physical_mask)
+        all_missing_contours, _ = cv2.findContours(missing_material_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if all_missing_contours:
+            processed_contour_indices = set()
+            for expected_hole in aligned_cad_holes:
+                total_detected_area_in_hole = 0
+                contours_in_this_hole = []
+                for i, contour in enumerate(all_missing_contours):
+                    M = cv2.moments(contour)
+                    if M["m00"] == 0: continue
+                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
+                    if cv2.pointPolygonTest(expected_hole, (float(cx), float(cy)), False) >= 0:
+                        total_detected_area_in_hole += cv2.contourArea(contour)
+                        contours_in_this_hole.append(contour)
+                        processed_contour_indices.add(i)
+
+                expected_hole_area = cv2.contourArea(expected_hole)
+                presence_ratio = min(1.0, total_detected_area_in_hole / expected_hole_area if expected_hole_area > 0 else 0.0)
+                occlusion_ratio = 1.0 - presence_ratio
+                max_allowed_occlusion = self.hole_occlusion_tolerance_var.get() / 100.0
+
+                if occlusion_ratio > max_allowed_occlusion:
+                    found_anomalies += 1
+                    cv2.drawContours(visualization_img, contours_in_this_hole, -1, (255, 100, 0), -1)
+                    M_hole = cv2.moments(expected_hole)
+                    label_cx = int(M_hole["m10"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
+                    label_cy = int(M_hole["m01"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
+                    label = f"Hole Occluded ({occlusion_ratio*100:.0f}%)"
+                    cv2.putText(visualization_img, label, (label_cx - 50, label_cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+            
+            for i, contour in enumerate(all_missing_contours):
+                if i in processed_contour_indices: continue
+                if cv2.contourArea(contour) < 5: continue
+                found_anomalies += 1
+                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1)
+                M = cv2.moments(contour)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
+                    cv2.putText(visualization_img, "Missing Material", (cx - 50, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+        # --- 3. CREASE DEFECT DETECTION ---
+        print("\n--- Starting Crease Detection ---")
+        low_t = self.crease_low_thresh_var.get()
+        high_t = self.crease_high_thresh_var.get()
+        min_presence = self.min_crease_presence_var.get() / 100.0
+
+        print(" - Running row scan for vertical creases...")
+        vertical_crease_mask = self._detect_crease_transitions(visualization_img, low_t, high_t, 'rows')
+        print(" - Running column scan for horizontal creases...")
+        horizontal_crease_mask = self._detect_crease_transitions(visualization_img, low_t, high_t, 'columns')
+
+        if self.debug_mode.get():
+            cv2.imshow("DEBUG: Vertical Crease Scan", vertical_crease_mask)
+            cv2.imshow("DEBUG: Horizontal Crease Scan", horizontal_crease_mask)
+
+        for crease in self.cad_features['creases']:
+            if crease.size < 4: continue
+            transformed_crease = transform_func(crease.reshape(-1, 1, 2), self.last_transform_matrix).astype(np.int32)
+            
+            p1 = transformed_crease[0, 0]; p2 = transformed_crease[-1, 0]
+            angle = abs(math.atan2(p2[1] - p1[1], p2[0] - p1[0]) * 180 / math.pi)
+
+            scan_mask_to_use = vertical_crease_mask if 45 < angle < 135 else horizontal_crease_mask
+            
+            crease_roi_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.polylines(crease_roi_mask, [transformed_crease], False, 255, 5) # Use thickness for ROI
+            
+            detected_pixels_mask = cv2.bitwise_and(scan_mask_to_use, crease_roi_mask)
+            detected_pixel_count = cv2.countNonZero(detected_pixels_mask)
+            
+            expected_pixel_count = cv2.arcLength(transformed_crease.astype(np.float32), False)
+            if expected_pixel_count < 1: continue
+
+            presence_ratio = detected_pixel_count / expected_pixel_count
+            
+            if presence_ratio < min_presence:
+                found_anomalies += 1
+                cv2.polylines(visualization_img, [transformed_crease], False, (0, 255, 0), 2)
+                label_pos = tuple(transformed_crease[len(transformed_crease) // 2, 0])
+                label = f"Crease Defect ({presence_ratio*100:.0f}%)"
+                cv2.putText(visualization_img, label, (label_pos[0] - 50, label_pos[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+        
+        # --- FINALIZATION ---
+        self.update_image_display(visualization_img)
+        messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} total potential anomalies.")
+        print(f"--- Anomaly Detection Complete: {found_anomalies} issues found. ---")
+    
+    # ... Rest of the unchanged methods from previous versions
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return
@@ -264,119 +467,6 @@ class InspectionApp:
         except Exception as e:
             messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{traceback.format_exc()}")
             self.reset_dxf_state()
-
-    def run_feature_specific_anomaly_detection(self):
-        print("\n--- Starting Feature-Specific Anomaly Detection (Corrected) ---")
-        if self.last_transform_matrix is None:
-            messagebox.showerror("Prerequisite Error", "You must run an alignment first.")
-            return
-
-        h, w = self.original_cv_image.shape[:2]
-        transform_matrix = self.last_transform_matrix
-        transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
-
-        raw_image_mask = np.zeros((h, w), dtype=np.uint8)
-        image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
-        if not image_contours_raw:
-            messagebox.showerror("Detection Error", "Could not find any object contours in the image."); return
-        cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
-
-        aligned_cad_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
-        aligned_cad_holes = [transform_func(h.reshape(-1, 1, 2), transform_matrix) for h in self.cad_features['holes']]
-        aligned_cad_outline_int = aligned_cad_outline.astype(np.int32)
-
-        outline_area_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
-        cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
-        
-        visualization_img = self.original_cv_image.copy()
-        cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
-        for hole in aligned_cad_holes:
-            cv2.polylines(visualization_img, [hole.astype(np.int32)], True, (100, 100, 100), 1)
-        found_anomalies = 0
-        
-        print("\n1. Analyzing Outline Deviations...")
-        x, y, w_b, h_b = cv2.boundingRect(aligned_cad_outline_int)
-        object_diagonal = math.sqrt(w_b**2 + h_b**2) if w_b > 0 and h_b > 0 else 1
-
-        extra_tolerance_perc = self.extra_material_tolerance_var.get()
-        extra_tolerance_px = max(1, int(round(object_diagonal * (extra_tolerance_perc / 100.0))))
-        kernel_dilate = np.ones((extra_tolerance_px, extra_tolerance_px), np.uint8)
-        upper_bound_mask = cv2.dilate(outline_area_mask, kernel_dilate)
-
-        missing_tolerance_perc = self.missing_material_tolerance_var.get()
-        missing_tolerance_px = max(1, int(round(object_diagonal * (missing_tolerance_perc / 100.0))))
-        kernel_erode = np.ones((missing_tolerance_px, missing_tolerance_px), np.uint8)
-        lower_bound_mask = cv2.erode(outline_area_mask, kernel_erode)
-
-        extra_material_mask = cv2.subtract(cleaned_physical_mask, upper_bound_mask)
-        contours, _ = cv2.findContours(extra_material_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            for contour in contours:
-                if cv2.contourArea(contour) < 4: continue
-                found_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1)
-                M = cv2.moments(contour)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
-                    cv2.putText(visualization_img, "Extra Material", (cx - 40, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-        missing_material_mask = cv2.subtract(lower_bound_mask, cleaned_physical_mask)
-        all_missing_contours, _ = cv2.findContours(missing_material_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if all_missing_contours:
-            processed_contour_indices = set()
-            
-            print("\n2. Analyzing Hole Occlusions...")
-            for expected_hole in aligned_cad_holes:
-                total_detected_area_in_hole = 0
-                contours_in_this_hole = []
-                for i, contour in enumerate(all_missing_contours):
-                    M = cv2.moments(contour)
-                    if M["m00"] == 0: continue
-                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
-                    if cv2.pointPolygonTest(expected_hole, (float(cx), float(cy)), False) >= 0:
-                        total_detected_area_in_hole += cv2.contourArea(contour)
-                        contours_in_this_hole.append(contour)
-                        processed_contour_indices.add(i)
-
-                expected_hole_area = cv2.contourArea(expected_hole)
-                presence_ratio = min(1.0, total_detected_area_in_hole / expected_hole_area if expected_hole_area > 0 else 0.0)
-                occlusion_ratio = 1.0 - presence_ratio
-                max_allowed_occlusion = self.hole_occlusion_tolerance_var.get() / 100.0
-
-                if occlusion_ratio > max_allowed_occlusion:
-                    found_anomalies += 1
-                    cv2.drawContours(visualization_img, contours_in_this_hole, -1, (255, 100, 0), -1)
-                    M_hole = cv2.moments(expected_hole)
-                    label_cx = int(M_hole["m10"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
-                    label_cy = int(M_hole["m01"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
-                    label = f"Hole Occluded ({occlusion_ratio*100:.0f}%)"
-                    cv2.putText(visualization_img, label, (label_cx - 50, label_cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
-                    print(f"   - Defect: Hole at ({label_cx},{label_cy}) is {occlusion_ratio*100:.1f}% occluded (Threshold: {max_allowed_occlusion*100:.1f}%).")
-            
-            print("\n3. Analyzing other Missing Material...")
-            for i, contour in enumerate(all_missing_contours):
-                if i in processed_contour_indices: continue
-                if cv2.contourArea(contour) < 5: continue
-                found_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1)
-                M = cv2.moments(contour)
-                if M["m00"] > 0:
-                    cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
-                    cv2.putText(visualization_img, "Missing Material", (cx - 50, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                print(f"   - Defect: Found unexpected 'Missing Material'.")
-
-        if self.debug_mode.get():
-            cv2.imshow("DEBUG: Cleaned Physical Mask", cleaned_physical_mask)
-            cv2.imshow("DEBUG: Upper Bound (Dilated Solid CAD)", upper_bound_mask)
-            cv2.imshow("DEBUG: Lower Bound (Eroded Solid CAD)", lower_bound_mask)
-            cv2.imshow("DEBUG: Extra Material", extra_material_mask)
-            cv2.imshow("DEBUG: Missing Areas (Holes + Defects)", missing_material_mask)
-
-        self.update_image_display(visualization_img)
-        messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} total potential anomalies.")
-        print(f"--- Anomaly Detection Complete: {found_anomalies} issues found. ---")
 
     def run_alignment_and_inspection(self):
         print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
