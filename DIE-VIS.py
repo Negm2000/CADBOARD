@@ -50,21 +50,15 @@ class InspectionApp:
         main_frame = tk.Frame(root, bg=self.colors["bg"])
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # All control widgets go into this top-level frame
         top_controls_frame = tk.Frame(main_frame, bg=self.colors["bg"])
         top_controls_frame.pack(fill=tk.X, side=tk.TOP, pady=(0, 10))
-
-        # Frame 1: Main action buttons
         control_frame_1 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_1.pack(fill=tk.X, pady=(0, 5))
-        # Frame 2: Anomaly detection controls
         control_frame_2 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_2.pack(fill=tk.X, pady=5)
-        # Frame 3: Status labels
         control_frame_3 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_3.pack(fill=tk.X, pady=(5,10))
         
-        # Final expanding frame for the image
         self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
         self.image_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -82,15 +76,21 @@ class InspectionApp:
         self.btn_inspect.pack(side=tk.LEFT, padx=5)
         self.btn_inspect_homography = ttk.Button(control_frame_1, text="Align (Homography)", state=tk.DISABLED, command=self.run_homography_inspection)
         self.btn_inspect_homography.pack(side=tk.LEFT, padx=5)
-        self.btn_find_anomalies = ttk.Button(control_frame_1, text="Find Anomalies", state=tk.DISABLED, command=self.run_anomaly_detection, style="Accent.TButton")
+        self.btn_find_anomalies = ttk.Button(control_frame_1, text="Find Anomalies", state=tk.DISABLED, command=self.run_feature_specific_anomaly_detection, style="Accent.TButton")
         self.btn_find_anomalies.pack(side=tk.LEFT, padx=(15, 5))
         
-        # Frame 2 Contents (Simplified and corrected controls)
-        self.lbl_area = tk.Label(control_frame_2, text="Min Area (% of Object):", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_area.pack(side=tk.LEFT, padx=(15, 5))
-        self.area_slider_var = tk.DoubleVar(value=0.1) 
-        self.area_slider = ttk.Scale(control_frame_2, from_=0.01, to=1.0, orient=tk.HORIZONTAL, length=200, variable=self.area_slider_var)
-        self.area_slider.pack(side=tk.LEFT, padx=5)
+        # Frame 2 Contents (New Robust Controls with corrected label)
+        self.lbl_hole_tolerance = tk.Label(control_frame_2, text="Min. Hole Presence (%):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_hole_tolerance.pack(side=tk.LEFT, padx=(15, 5))
+        self.min_hole_presence_var = tk.DoubleVar(value=80.0) # Correctly defined here
+        self.hole_tolerance_slider = ttk.Scale(control_frame_2, from_=1.0, to=99.0, orient=tk.HORIZONTAL, length=150, variable=self.min_hole_presence_var)
+        self.hole_tolerance_slider.pack(side=tk.LEFT, padx=5)
+
+        self.lbl_outline_tolerance = tk.Label(control_frame_2, text="Outline Tolerance (% of Diagonal):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_outline_tolerance.pack(side=tk.LEFT, padx=(25, 5))
+        self.outline_tolerance_var = tk.DoubleVar(value=0.5)
+        self.outline_tolerance_slider = ttk.Scale(control_frame_2, from_=0.1, to=2.0, orient=tk.HORIZONTAL, length=150, variable=self.outline_tolerance_var)
+        self.outline_tolerance_slider.pack(side=tk.LEFT, padx=5)
         
         self.debug_mode = tk.BooleanVar()
         self.chk_debug = tk.Checkbutton(control_frame_2, text="Debug Mode", variable=self.debug_mode, 
@@ -195,97 +195,132 @@ class InspectionApp:
             messagebox.showerror("DXF Load Error", f"An error occurred during DXF processing:\n\n{traceback.format_exc()}")
             self.reset_dxf_state()
 
-    def run_anomaly_detection(self):
-        print("\n--- Starting Anomaly Detection ---")
+    def run_feature_specific_anomaly_detection(self):
+        print("\n--- Starting Feature-Specific Anomaly Detection (Corrected) ---")
         if self.last_transform_matrix is None:
             messagebox.showerror("Prerequisite Error", "You must run an alignment first.")
             return
 
-        print(f"1. Using pre-calculated '{self.last_transform_type}' alignment.")
-        transform_matrix = self.last_transform_matrix
+        # --- Setup: Masks and Aligned Features ---
         h, w = self.original_cv_image.shape[:2]
-
-        print("2. Generating 'Ideal Mask' from aligned DXF...")
-        dxf_mask = np.zeros((h, w), dtype=np.uint8)
-        
-        # Determine which transformation function to use based on the last alignment type
+        transform_matrix = self.last_transform_matrix
         transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
-        
-        transformed_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
-        cv2.drawContours(dxf_mask, [transformed_outline.astype(np.int32)], -1, 255, cv2.FILLED)
-        for hole in self.cad_features['holes']:
-            if hole.size > 0:
-                transformed_hole = transform_func(hole.reshape(-1, 1, 2), transform_matrix)
-                cv2.drawContours(dxf_mask, [transformed_hole.astype(np.int32)], -1, 0, cv2.FILLED)
 
-        print("3. Generating 'Actual Mask' and ROI from image contours...")
-        image_contours = self.find_image_contours_with_holes(self.original_cv_image)
-        if not image_contours:
+        raw_image_mask = np.zeros((h, w), dtype=np.uint8)
+        image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
+        if not image_contours_raw:
             messagebox.showerror("Detection Error", "Could not find any object contours in the image.")
             return
-            
-        image_mask = np.zeros((h, w), dtype=np.uint8)
-        roi_mask = np.zeros((h, w), dtype=np.uint8)
-        main_part_contour = max(image_contours, key=cv2.contourArea)
-        cv2.drawContours(image_mask, image_contours, -1, 255, cv2.FILLED)
-        cv2.drawContours(roi_mask, [main_part_contour], -1, 255, cv2.FILLED)
+        cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
 
-        print("4. Calculating relative area threshold...")
-        total_object_area = cv2.contourArea(main_part_contour)
-        if total_object_area == 0:
-            messagebox.showerror("Error", "Detected object has zero area. Cannot calculate relative thresholds.")
-            return
-        min_area_percent = self.area_slider_var.get()
-        min_pixel_area = (min_area_percent / 100.0) * total_object_area
-        print(f"   Object Area: {total_object_area:.0f}px | Min Anomaly: {min_area_percent:.2f}% ({min_pixel_area:.2f}px)")
+        aligned_cad_outline = transform_func(self.cad_features['outline'].reshape(-1, 1, 2), transform_matrix)
+        aligned_cad_holes = [transform_func(h.reshape(-1, 1, 2), transform_matrix) for h in self.cad_features['holes']]
+        aligned_cad_outline_int = aligned_cad_outline.astype(np.int32)
 
-        print("5. Finding extra and missing features...")
-        extra_feature_mask = cv2.subtract(image_mask, dxf_mask)
-        extra_feature_mask = cv2.bitwise_and(extra_feature_mask, roi_mask)
-        missing_feature_mask = cv2.subtract(dxf_mask, image_mask)
+        # Create a mask of the solid CAD outline area
+        outline_area_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
+        
+        # Create a clean mask of the physical object by erasing all background noise
+        cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
+        
+        # This "ideal" mask represents the perfect final product (outline minus holes).
+        ideal_mask = outline_area_mask.copy()
+        for hole in aligned_cad_holes:
+            cv2.drawContours(ideal_mask, [hole.astype(np.int32)], -1, 0, -1)
+
+        visualization_img = self.original_cv_image.copy()
+        cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
+        found_anomalies = 0
+        
+        # --- 1. RE-INTEGRATED OUTLINE TOLERANCE LOGIC ---
+        print("\n1. Analyzing Outline Deviations...")
+        outline_tolerance_percentage = self.outline_tolerance_var.get()
+        x, y, w_b, h_b = cv2.boundingRect(aligned_cad_outline_int)
+        object_diagonal = math.sqrt(w_b**2 + h_b**2)
+        outline_tolerance_px = max(1, int(round(object_diagonal * (outline_tolerance_percentage / 100.0))))
+        print(f"   - Applying {outline_tolerance_px}px tolerance band.")
+
+        kernel = np.ones((outline_tolerance_px, outline_tolerance_px), np.uint8)
+        
+        # Create an "acceptance zone" by dilating the ideal mask. Anything outside this is extra.
+        upper_bound_mask = cv2.dilate(ideal_mask, kernel)
+        
+        # Create a "required zone" by eroding the ideal mask. Anything missing from here is a defect.
+        lower_bound_mask = cv2.erode(ideal_mask, kernel)
+
+        # Find "Extra Material" that is outside the acceptance zone
+        extra_material_mask = cv2.subtract(cleaned_physical_mask, upper_bound_mask)
+        contours, _ = cv2.findContours(extra_material_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            print(f"   - Found {len(contours)} 'Extra Material' anomalies.")
+            cv2.drawContours(visualization_img, contours, -1, (0, 165, 255), -1) # Orange
+            found_anomalies += len(contours)
+
+        # Find "Missing Material" that is inside the required zone
+        missing_material_mask = cv2.subtract(lower_bound_mask, cleaned_physical_mask)
+        contours, hierarchy = cv2.findContours(missing_material_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contours and hierarchy is not None:
+            print(f"\n2. Analyzing {len(contours)} potential missing features...")
+            for i, contour in enumerate(contours):
+                if cv2.contourArea(contour) < 5: continue
+
+                is_known_hole = False
+                M = cv2.moments(contour)
+                if M["m00"] == 0: continue
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                test_point = (float(cx), float(cy))
+                
+                # Check if this missing blob corresponds to a known CAD hole
+                for expected_hole in aligned_cad_holes:
+                    if cv2.pointPolygonTest(expected_hole, test_point, False) >= 0:
+                        is_known_hole = True
+                        break
+
+                # --- 2. IMPROVED DEFECT LABELING ---
+                if is_known_hole:
+                    # This is a verified missing hole. Check its presence against the slider.
+                    min_presence_ratio = self.min_hole_presence_var.get() / 100.0
+                    
+                    # To check presence, we need the expected area of THIS specific hole
+                    expected_hole_area = 1.0 # default
+                    for eh in aligned_cad_holes:
+                        if cv2.pointPolygonTest(eh, test_point, False) >= 0:
+                            expected_hole_area = cv2.contourArea(eh)
+                            break
+                    
+                    missing_area = cv2.contourArea(contour)
+                    presence_ratio = 1.0 - (missing_area / expected_hole_area) if expected_hole_area > 0 else 1.0
+
+                    if presence_ratio < min_presence_ratio:
+                        cv2.drawContours(visualization_img, [contour], -1, (255, 100, 0), -1) # Blue
+                        label = f"Hole ({100*presence_ratio:.0f}%)"
+                        cv2.putText(visualization_img, label, (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+                        print(f"   - Defect: A CAD hole is only {100*presence_ratio:.1f}% present.")
+                        found_anomalies += 1
+                else:
+                    # This is material missing from the main body, not a designated hole area.
+                    cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1) # Red
+                    # Use the new, more descriptive label: "Outline Defect"
+                    cv2.putText(visualization_img, "Outline Defect", (cx-40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+                    print(f"   - Defect: Found an unexpected Outline Defect.")
+                    found_anomalies += 1
 
         if self.debug_mode.get():
-            dxf_color = cv2.cvtColor(dxf_mask, cv2.COLOR_GRAY2BGR)
-            img_color = cv2.cvtColor(image_mask, cv2.COLOR_GRAY2BGR)
-            roi_color = cv2.cvtColor(roi_mask, cv2.COLOR_GRAY2BGR)
-            debug_stack = np.hstack([dxf_color, img_color, roi_color])
-            self._resize_for_display("DEBUG: Ideal | Actual | ROI", debug_stack, max_dim=1800)
+            cv2.imshow("DEBUG: Cleaned Physical Mask", cleaned_physical_mask)
+            cv2.imshow("DEBUG: Upper Bound (Acceptance Zone)", upper_bound_mask)
+            cv2.imshow("DEBUG: Lower Bound (Required Zone)", lower_bound_mask)
+            cv2.imshow("DEBUG: Extra Material", extra_material_mask)
+            cv2.imshow("DEBUG: Missing Material", missing_material_mask)
 
-        print("6. Filtering and visualizing anomalies...")
-        visualization_img = self.original_cv_image.copy()
-        cv2.polylines(visualization_img, [transformed_outline.astype(np.int32)], True, (0, 255, 255), 2)
-        
-        # Helper function to process and draw anomalies
-        def process_anomalies(mask, label, color):
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            count = 0
-            for c in contours:
-                area = cv2.contourArea(c)
-                if area > min_pixel_area:
-                    count += 1
-                    M = cv2.moments(c)
-                    cx, cy = (0,0)
-                    if M["m00"] != 0:
-                        cx = int(M["m10"] / M["m00"])
-                        cy = int(M["m01"] / M["m00"])
-                    
-                    cv2.drawContours(visualization_img, [c], -1, color, -1)
-                    label_text = f"{label} (Area: {area:.0f})"
-                    cv2.putText(visualization_img, label_text, (cx - 70, cy + 5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            return count
-
-        found_extra = process_anomalies(extra_feature_mask, "Extra Feature", (255, 0, 255))
-        found_missing = process_anomalies(missing_feature_mask, "Missing Feature", (255, 100, 0))
-
+        # --- Final Update ---
         self.update_image_display(visualization_img)
-        total = found_extra + found_missing
-        messagebox.showinfo("Inspection Complete", 
-                            f"Found {total} total anomalies:\n"
-                            f"- {found_extra} Extra Features\n"
-                            f"- {found_missing} Missing Features")
-        print(f"--- Anomaly Detection Complete ---")
-        
+        messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} total potential anomalies.")
+        print(f"--- Anomaly Detection Complete: {found_anomalies} issues found. ---")
+
+
     def run_alignment_and_inspection(self):
         print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
         transform_matrix = self.align_with_moments_icp_pipeline()
@@ -591,12 +626,13 @@ class InspectionApp:
         return largest_contour.astype(np.float32) if largest_contour is not None else None
 
     def find_image_contours_with_holes(self, image):
-        if image is None: return None
+        if image is None: return None, None
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        contours, _ = cv2.findContours(color_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        return contours if contours else None
+        # Use RETR_CCOMP to get the full hierarchy (external and internal contours)
+        contours, hierarchy = cv2.findContours(color_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        return contours, hierarchy
 
     def run_visualization(self):
         print("--- Running Input Visualization ---")
