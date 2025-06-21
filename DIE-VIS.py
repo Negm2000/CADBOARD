@@ -28,7 +28,7 @@ class InspectionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Geometric Engine)")
-        self.root.geometry("1300x950") # Increased height for new controls
+        self.root.geometry("1300x950")
 
         # --- State Variables ---
         self.image_path = None
@@ -119,30 +119,38 @@ class InspectionApp:
                                         activeforeground=self.colors["fg"], highlightthickness=0)
         self.chk_debug.pack(side=tk.LEFT, padx=(142, 5))
 
-        # Crease Controls Frame
-        self.lbl_crease_low = tk.Label(control_frame_crease, text="Crease Low Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
+        # --- Crease Controls Frame (REPURPOSED FOR CANNY) ---
+        self.lbl_crease_low = tk.Label(control_frame_crease, text="Canny Low Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_crease_low.pack(side=tk.LEFT, padx=(15,5))
-        self.crease_low_thresh_var = tk.IntVar(value=10)
+        self.crease_low_thresh_var = tk.IntVar(value=50) # Adjusted default for Canny
         self.crease_low_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_low_thresh_var, command=self._update_slider_labels)
         self.crease_low_thresh_slider.pack(side=tk.LEFT, padx=5)
         self.lbl_crease_low_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
         self.lbl_crease_low_val.pack(side=tk.LEFT, padx=(0,10))
         
-        self.lbl_crease_high = tk.Label(control_frame_crease, text="Crease High Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_high = tk.Label(control_frame_crease, text="Canny High Thresh:", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_crease_high.pack(side=tk.LEFT, padx=(10,5))
-        self.crease_high_thresh_var = tk.IntVar(value=100)
+        self.crease_high_thresh_var = tk.IntVar(value=150) # Adjusted default for Canny
         self.crease_high_thresh_slider = ttk.Scale(control_frame_crease, from_=1, to=254, orient=tk.HORIZONTAL, length=100, variable=self.crease_high_thresh_var, command=self._update_slider_labels)
         self.crease_high_thresh_slider.pack(side=tk.LEFT, padx=5)
         self.lbl_crease_high_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
         self.lbl_crease_high_val.pack(side=tk.LEFT, padx=(0,10))
 
-        self.lbl_crease_presence = tk.Label(control_frame_crease, text="Min Crease Presence (%):", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.lbl_crease_presence.pack(side=tk.LEFT, padx=(10,5))
-        self.min_crease_presence_var = tk.DoubleVar(value=50.0)
-        self.min_crease_presence_slider = ttk.Scale(control_frame_crease, from_=1, to=99, orient=tk.HORIZONTAL, length=100, variable=self.min_crease_presence_var, command=self._update_slider_labels)
-        self.min_crease_presence_slider.pack(side=tk.LEFT, padx=5)
-        self.lbl_crease_presence_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
-        self.lbl_crease_presence_val.pack(side=tk.LEFT, padx=0)
+        self.lbl_crease_search_width = tk.Label(control_frame_crease, text="Crease Search Width (px):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_search_width.pack(side=tk.LEFT, padx=(10,5))
+        self.crease_search_width_var = tk.IntVar(value=5)
+        self.crease_search_width_slider = ttk.Scale(control_frame_crease, from_=1, to=25, orient=tk.HORIZONTAL, length=100, variable=self.crease_search_width_var, command=self._update_slider_labels)
+        self.crease_search_width_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_search_width_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=4, anchor='w')
+        self.lbl_crease_search_width_val.pack(side=tk.LEFT, padx=(0,10))
+        
+        self.lbl_crease_density = tk.Label(control_frame_crease, text="Min Crease Density (%):", bg=self.colors["bg"], fg=self.colors["fg"])
+        self.lbl_crease_density.pack(side=tk.LEFT, padx=(10,5))
+        self.min_crease_density_var = tk.DoubleVar(value=80.0) # Renamed and adjusted default
+        self.min_crease_density_slider = ttk.Scale(control_frame_crease, from_=1, to=200, orient=tk.HORIZONTAL, length=100, variable=self.min_crease_density_var, command=self._update_slider_labels)
+        self.min_crease_density_slider.pack(side=tk.LEFT, padx=5)
+        self.lbl_crease_density_val = tk.Label(control_frame_crease, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
+        self.lbl_crease_density_val.pack(side=tk.LEFT, padx=0)
         
         # Frame 4: Status Labels
         self.lbl_image_status = tk.Label(control_frame_4, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
@@ -170,7 +178,8 @@ class InspectionApp:
             "extra_material_tolerance": self.extra_material_tolerance_var.get(),
             "crease_low_thresh": self.crease_low_thresh_var.get(),
             "crease_high_thresh": self.crease_high_thresh_var.get(),
-            "min_crease_presence": self.min_crease_presence_var.get(),
+            "crease_search_width": self.crease_search_width_var.get(),
+            "min_crease_density": self.min_crease_density_var.get(),
             "debug_mode": self.debug_mode.get()
         }
         try:
@@ -188,9 +197,10 @@ class InspectionApp:
                     self.hole_occlusion_tolerance_var.set(settings.get("hole_occlusion_tolerance", 10.0))
                     self.missing_material_tolerance_var.set(settings.get("missing_material_tolerance", 0.5))
                     self.extra_material_tolerance_var.set(settings.get("extra_material_tolerance", 0.5))
-                    self.crease_low_thresh_var.set(settings.get("crease_low_thresh", 10))
-                    self.crease_high_thresh_var.set(settings.get("crease_high_thresh", 100))
-                    self.min_crease_presence_var.set(settings.get("min_crease_presence", 50.0))
+                    self.crease_low_thresh_var.set(settings.get("crease_low_thresh", 50))
+                    self.crease_high_thresh_var.set(settings.get("crease_high_thresh", 150))
+                    self.crease_search_width_var.set(settings.get("crease_search_width", 5))
+                    self.min_crease_density_var.set(settings.get("min_crease_density", 80.0))
                     self.debug_mode.set(settings.get("debug_mode", False))
                     print("Settings loaded successfully.")
         except Exception as e:
@@ -204,7 +214,8 @@ class InspectionApp:
         self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
         self.lbl_crease_low_val.config(text=f"{self.crease_low_thresh_var.get()}")
         self.lbl_crease_high_val.config(text=f"{self.crease_high_thresh_var.get()}")
-        self.lbl_crease_presence_val.config(text=f"{self.min_crease_presence_var.get():.1f}%")
+        self.lbl_crease_search_width_val.config(text=f"{self.crease_search_width_var.get()}px")
+        self.lbl_crease_density_val.config(text=f"{self.min_crease_density_var.get():.1f}%")
         
     def setup_styles(self):
         style = ttk.Style()
@@ -216,42 +227,7 @@ class InspectionApp:
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"], font=('Helvetica', 10))
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
-
-    def _detect_crease_transitions(self, image, low_thresh, high_thresh, scan_type='rows'):
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        if scan_type == 'columns':
-            gray_image = cv2.transpose(gray_image)
-
-        h, w = gray_image.shape
-        crease_mask = np.zeros((h, w), dtype=np.uint8)
-
-        for i in range(h):
-            start, down, up = False, False, False
-            pre_val, pre_coord = 0, 0
-            for j in range(w - 1):
-                p1 = int(gray_image[i, j])
-                p2 = int(gray_image[i, j + 1])
-
-                if p1 > p2: # Downward transition
-                    if not start:
-                        start, down, pre_val, pre_coord = True, True, p1, j
-                    elif up:
-                        delta = abs(pre_val - p1)
-                        if low_thresh <= delta <= high_thresh:
-                            crease_mask[i, (j + pre_coord) // 2] = 255
-                        up, down, pre_val, pre_coord = False, True, p1, j
-                elif p1 < p2: # Upward transition
-                    if not start:
-                        start, up, pre_val, pre_coord = True, True, p1, j
-                    elif down:
-                        delta = abs(pre_val - p1)
-                        if low_thresh <= delta <= high_thresh:
-                            crease_mask[i, (j + pre_coord) // 2] = 255
-                        down, up, pre_val, pre_coord = False, True, p1, j
-        
-        return cv2.transpose(crease_mask) if scan_type == 'columns' else crease_mask
-
+    
     def run_feature_specific_anomaly_detection(self):
         print("\n--- Starting Full Anomaly Detection ---")
         if self.last_transform_matrix is None or self.original_cv_image is None:
@@ -282,6 +258,7 @@ class InspectionApp:
         cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
         
         # --- 2. OUTLINE AND HOLE DEFECTS ---
+        # (This section remains unchanged)
         cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
         
         object_diagonal = math.sqrt(w**2 + h**2)
@@ -346,54 +323,76 @@ class InspectionApp:
                     cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
                     cv2.putText(visualization_img, "Missing Material", (cx - 50, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
-        # --- 3. CREASE DEFECT DETECTION ---
-        print("\n--- Starting Crease Detection ---")
-        low_t = self.crease_low_thresh_var.get()
-        high_t = self.crease_high_thresh_var.get()
-        min_presence = self.min_crease_presence_var.get() / 100.0
+        # --- 3. CREASE DEFECT DETECTION (ROBUST CANNY-BASED METHOD) ---
+        print("\n--- Starting Robust Crease Detection (Canny/ROI Density Method) ---")
+        
+        # Get parameters from the GUI
+        canny_low = self.crease_low_thresh_var.get()
+        canny_high = self.crease_high_thresh_var.get()
+        search_width = self.crease_search_width_var.get()
+        min_density_ratio = self.min_crease_density_var.get() / 100.0
 
-        print(" - Running row scan for vertical creases...")
-        vertical_crease_mask = self._detect_crease_transitions(visualization_img, low_t, high_t, 'rows')
-        print(" - Running column scan for horizontal creases...")
-        horizontal_crease_mask = self._detect_crease_transitions(visualization_img, low_t, high_t, 'columns')
-
+        # Step 1: Pre-process image and find all edges using Canny
+        gray_img = cv2.cvtColor(self.original_cv_image, cv2.COLOR_BGR2GRAY)
+        blurred_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
+        canny_edges = cv2.Canny(blurred_img, canny_low, canny_high)
+        
         if self.debug_mode.get():
-            cv2.imshow("DEBUG: Vertical Crease Scan", vertical_crease_mask)
-            cv2.imshow("DEBUG: Horizontal Crease Scan", horizontal_crease_mask)
+            self._resize_for_display("DEBUG: Canny Edge Map", canny_edges)
 
         for crease in self.cad_features['creases']:
-            if crease.size < 4: continue
-            transformed_crease = transform_func(crease.reshape(-1, 1, 2), self.last_transform_matrix).astype(np.int32)
+            if crease.size < 4: continue # Must have at least two points
             
-            p1 = transformed_crease[0, 0]; p2 = transformed_crease[-1, 0]
-            angle = abs(math.atan2(p2[1] - p1[1], p2[0] - p1[0]) * 180 / math.pi)
+            # Transform the CAD crease to its position on the image
+            transformed_crease_float = transform_func(crease.reshape(-1, 1, 2), self.last_transform_matrix)
+            transformed_crease_int = transformed_crease_float.astype(np.int32)
 
-            scan_mask_to_use = vertical_crease_mask if 45 < angle < 135 else horizontal_crease_mask
-            
-            crease_roi_mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.polylines(crease_roi_mask, [transformed_crease], False, 255, 5) # Use thickness for ROI
-            
-            detected_pixels_mask = cv2.bitwise_and(scan_mask_to_use, crease_roi_mask)
-            detected_pixel_count = cv2.countNonZero(detected_pixels_mask)
-            
-            expected_pixel_count = cv2.arcLength(transformed_crease.astype(np.float32), False)
-            if expected_pixel_count < 1: continue
+            # Step 2: Create a search corridor (ROI mask) around the expected crease path
+            crease_corridor_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.polylines(crease_corridor_mask, [transformed_crease_int], False, 255, search_width)
 
-            presence_ratio = detected_pixel_count / expected_pixel_count
+            # Step 3: Find the actual edge pixels that fall within our search corridor
+            detected_edges_in_corridor = cv2.bitwise_and(canny_edges, crease_corridor_mask)
             
-            if presence_ratio < min_presence:
+            if self.debug_mode.get():
+                 # Create a visual representation of the search
+                 debug_corridor_viz = cv2.cvtColor(crease_corridor_mask, cv2.COLOR_GRAY2BGR)
+                 debug_corridor_viz[detected_edges_in_corridor == 255] = [0,255,0] # Green for detected edges
+                 self._resize_for_display(f"DEBUG: Corridor for Crease", debug_corridor_viz)
+
+
+            # Step 4: Measure the density of detected edges along the crease's path
+            detected_pixels_count = cv2.countNonZero(detected_edges_in_corridor)
+            expected_length = cv2.arcLength(transformed_crease_float, False)
+            
+            if expected_length < 1: continue
+
+            # A Canny edge detector often finds two parallel edges for a crease (one for each side).
+            # So, a density_ratio > 1.0 is possible and indicates a strong crease.
+            density_ratio = detected_pixels_count / expected_length
+            
+            # Step 5: Compare density to the threshold and report anomaly
+            if density_ratio < min_density_ratio:
                 found_anomalies += 1
-                cv2.polylines(visualization_img, [transformed_crease], False, (0, 255, 0), 2)
-                label_pos = tuple(transformed_crease[len(transformed_crease) // 2, 0])
-                label = f"Crease Defect ({presence_ratio*100:.0f}%)"
-                cv2.putText(visualization_img, label, (label_pos[0] - 50, label_pos[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
+                color = (0, 0, 255) # Red for failed crease
+                status = "Defect"
+            else:
+                color = (255, 128, 0) # Blue for passed crease
+                status = "OK"
+
+            cv2.polylines(visualization_img, [transformed_crease_int], False, color, 2)
+            
+            mid_point = transformed_crease_int[len(transformed_crease_int)//2][0]
+            label_pos = tuple(mid_point)
+            label = f"Crease {status} ({density_ratio*100:.0f}%)"
+            cv2.putText(visualization_img, label, (label_pos[0] - 50, label_pos[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
         
         # --- FINALIZATION ---
         self.update_image_display(visualization_img)
         messagebox.showinfo("Inspection Complete", f"Found {found_anomalies} total potential anomalies.")
         print(f"--- Anomaly Detection Complete: {found_anomalies} issues found. ---")
     
-    # ... Rest of the unchanged methods from previous versions
+    # ... (Rest of the unchanged methods) ...
     def load_image(self):
         filepath = filedialog.askopenfilename(title="Select an Image", filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp"), ("All files", "*.*")])
         if not filepath: return

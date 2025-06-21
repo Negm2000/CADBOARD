@@ -2,5 +2,9 @@
     "hole_occlusion_tolerance": 80.0,
     "missing_material_tolerance": 0.835,
     "extra_material_tolerance": 0.7941666666666667,
+    "crease_low_thresh": 12,
+    "crease_high_thresh": 66,
+    "crease_search_width": 25,
+    "min_crease_density": 55.01428571428571,
     "debug_mode": false
 }
