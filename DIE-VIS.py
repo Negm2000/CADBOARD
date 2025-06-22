@@ -268,15 +268,11 @@ class InspectionApp:
         hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
         color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        
-        kernel = np.ones((7,7), np.uint8)
-        cleaned_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
         if self.debug_mode.get():
-            self._resize_for_display("DEBUG: HSV Mask (Outline)", cleaned_mask)
+            self._resize_for_display("DEBUG: HSV Mask (Outline)", color_mask)
 
-        return cv2.findContours(cleaned_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        return cv2.findContours(color_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
     # --- Main Application Logic ---
     def run_feature_specific_anomaly_detection(self):
@@ -475,7 +471,7 @@ class InspectionApp:
             return
         
         fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
-        LEARNING_FRAMES = 150
+        LEARNING_FRAMES = 50
         frame_count = 0
         last_mask, last_frame = None, None
         
@@ -494,8 +490,10 @@ class InspectionApp:
             fgmask = fgbg.apply(frame, learningRate=learning_rate)
             
             _, binary_mask = cv2.threshold(fgmask, 254, 255, cv2.THRESH_BINARY)
-            kernel = np.ones((7,7), np.uint8)
+            kernel = np.ones((3,3), np.uint8)
             cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+            
             
             contours, hierarchy = cv2.findContours(cleaned_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
             hierarchical_mask = np.zeros(cleaned_mask.shape, dtype=np.uint8)
@@ -895,7 +893,7 @@ class InspectionApp:
             cad_corners_transformed = cv2.perspectiveTransform(cad_corners.reshape(-1, 1, 2), current_H).reshape(-1, 2)
             _, indices = image_corner_kdtree.query(cad_corners_transformed)
             src_pts, dst_pts = cad_corners, image_corners[indices]
-            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 10.0)
+            next_H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 20.0)
             if next_H is None:
                 break
             current_mse = self._calculate_alignment_error(cad_contour, img_contour, next_H)
