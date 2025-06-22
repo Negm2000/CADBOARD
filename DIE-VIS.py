@@ -9,6 +9,7 @@ import os
 import traceback
 import json
 from scipy.spatial import KDTree
+import time
 
 try:
     from pyueye import ueye
@@ -22,13 +23,203 @@ except ImportError:
             return method
     ueye = MockUeye()
 
+class VideoReconstructor:
+    """
+    Handles the logic for reconstructing a full cardboard image from a video stream.
+    This class encapsulates the algorithm discussed based on the provided research papers.
+    """
+    def __init__(self, progress_callback):
+        self.progress_callback = progress_callback
+        self.ffull = None  # The full reconstructed color image
+        self.mfull = None  # The full reconstructed mask
+        self.background_subtractor = None
+        self.cardboard_in_progress = False
+        self.last_frame_had_box = False
+        self.last_box_centroid_x = -1 # Track the centroid to detect movement
+
+    def _initialize_background(self, cap, initial_frames=50):
+        """
+        Initializes the background model by processing the first few frames of the video.
+        """
+        print("Initializing background model...")
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(history=initial_frames, varThreshold=32, detectShadows=False)
+        
+        frame_count = 0
+        while cap.isOpened() and frame_count < initial_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Use the first few frames to train the background model
+            self.background_subtractor.apply(frame)
+            frame_count += 1
+            if self.progress_callback:
+                # Show some initial progress during background learning
+                self.progress_callback(int((frame_count / initial_frames) * 10))
+        
+        # Reset video capture to the beginning for the actual processing
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        print("Background model initialized.")
+
+
+    def run(self, video_path):
+        """
+        Executes the entire video reconstruction process.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print("Error: Could not open video file.")
+            return None
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Reset state for a new run
+        self.ffull = None
+        self.mfull = None
+        self.cardboard_in_progress = False
+        self.last_frame_had_box = False
+        self.last_box_centroid_x = -1
+
+        self._initialize_background(cap)
+
+        frame_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                # End of video
+                if self.cardboard_in_progress and self.last_frame_had_box:
+                    # If video ends while a box is being processed, finalize it
+                    print("Video ended. Finalizing last detected box.")
+                break
+
+            self._process_frame(frame, frame_idx, total_frames)
+            frame_idx += 1
+        
+        cap.release()
+        cv2.destroyAllWindows()
+        return self.ffull
+
+    def _process_frame(self, frame, frame_idx, total_frames):
+        """
+        Processes a single frame from the video. The background model is only updated
+        when no cardboard is detected, preventing the model from learning the object.
+        """
+        if self.progress_callback:
+            progress = 10 + int((frame_idx / total_frames) * 90)
+            self.progress_callback(progress)
+
+        # Generate foreground mask WITHOUT updating the background model (learningRate=0)
+        fg_mask_raw = self.background_subtractor.apply(frame, learningRate=0)
+
+        # Clean up the mask to get a reliable detection result
+        _, fg_mask = cv2.threshold(fg_mask_raw, 200, 255, cv2.THRESH_BINARY)
+        kernel = np.ones((5, 5), np.uint8)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+        
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        box_is_present = len(contours) > 0
+
+        if box_is_present:
+            if not self.cardboard_in_progress:
+                print(f"Frame {frame_idx}: New cardboard detected. Starting reconstruction.")
+                self.cardboard_in_progress = True
+                self.ffull = frame.copy()
+                self.mfull = fg_mask.copy()
+                # Initialize centroid tracking
+                M = cv2.moments(fg_mask)
+                if M["m00"] > 0:
+                   self.last_box_centroid_x = int(M["m10"] / M["m00"])
+            else:
+                if self.ffull is not None:
+                    self._reconstruct_slice(frame, fg_mask)
+        else:
+            self.background_subtractor.apply(frame) # Update background when empty
+            if self.cardboard_in_progress and self.last_frame_had_box:
+                print(f"Frame {frame_idx}: Cardboard has passed. Finalizing reconstruction.")
+                self.cardboard_in_progress = False 
+                self.last_box_centroid_x = -1
+
+        self.last_frame_had_box = box_is_present
+        
+    def _reconstruct_slice(self, f_current, m_current):
+        """
+        Stitches the new cardboard slice onto the existing reconstructed image.
+        This version calculates displacement to correctly align and blend frames.
+        """
+        if self.mfull is None or self.ffull is None:
+            return
+
+        # 1. Get centroid of new mask to calculate movement
+        M_current = cv2.moments(m_current)
+        if M_current["m00"] == 0:
+            return # No object in new mask
+        
+        cx_current = int(M_current["m10"] / M_current["m00"])
+
+        # 2. Calculate displacement
+        # If this is the first slice after detection, last_box_centroid_x is already set.
+        displacement = cx_current - self.last_box_centroid_x
+        self.last_box_centroid_x = cx_current
+        
+        # We only care about horizontal movement for stitching
+        if displacement <= 0:
+            # If the box isn't moving forward, don't stitch, just wait.
+            return 
+        
+        # 3. Determine the size of the new canvas needed
+        h, w, _ = f_current.shape
+        h_full, w_full, _ = self.ffull.shape
+        
+        # New width is the old width plus the displacement
+        new_canvas_width = w_full + displacement
+        
+        # 4. Create new canvases and copy the old data
+        new_ffull = np.zeros((h, new_canvas_width, 3), dtype=np.uint8)
+        new_mfull = np.zeros((h, new_canvas_width), dtype=np.uint8)
+        
+        new_ffull[:, :w_full] = self.ffull
+        new_mfull[:, :w_full] = self.mfull
+        
+        # 5. Define the slice of the new frame to add
+        # This is the part of the current frame that is "new"
+        new_part = f_current[:, -displacement:]
+        new_mask_part = m_current[:, -displacement:]
+        
+        # 6. Blend the overlapping region to create a seamless transition
+        # The overlap is the region from `w_full - displacement` to `w_full` on the old canvas
+        overlap_width = min(displacement, w_full)
+        blend_start_x = w_full - overlap_width
+
+        for i in range(overlap_width):
+            alpha = i / overlap_width # Feathering weight
+            target_col = blend_start_x + i
+            
+            old_pixel_col = new_ffull[:, target_col]
+            new_pixel_col = f_current[:, w - displacement + i] # Corresponding part from new frame
+
+            # Only blend where the new mask has content
+            mask_indices = m_current[:, w - displacement + i] > 0
+            blended_col = cv2.addWeighted(new_pixel_col, alpha, old_pixel_col, 1 - alpha, 0)
+            
+            new_ffull[mask_indices, target_col] = blended_col[mask_indices]
+
+        # 7. Paste the purely new part of the image and update the mask
+        new_ffull[:, w_full:] = new_part
+        new_mfull[:, w_full:] = new_mask_part
+        
+        # 8. Update the main reconstruction images
+        self.ffull = new_ffull
+        self.mfull = new_mfull
 
 class InspectionApp:
-
+    """
+    The main GUI application for visualizing and inspecting cardboard.
+    """
     def __init__(self, root):
         self.root = root
         self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Geometric Engine)")
-        self.root.geometry("1300x950")
+        self.root.geometry("1400x950")
 
         # --- State Variables ---
         self.image_path = None
@@ -39,6 +230,9 @@ class InspectionApp:
         self.last_transform_matrix = None
         self.last_transform_type = None
         self.settings_file = "settings.json"
+        
+        # Instantiate the reconstructor with a callback to the progress bar
+        self.reconstructor = VideoReconstructor(self._update_progress)
 
         # --- UI Colors and Styles ---
         self.colors = {
@@ -66,11 +260,6 @@ class InspectionApp:
         crease_controls_container.pack(fill=tk.X, pady=(5,0))
         control_frame_4 = tk.Frame(top_controls_frame, bg=self.colors["bg"])
         control_frame_4.pack(fill=tk.X, pady=(5,10))
-        
-        # Add a progress bar for video processing
-        self.progress_bar = ttk.Progressbar(main_frame, orient='horizontal', mode='determinate')
-        self.progress_bar.pack(fill=tk.X, side=tk.TOP, pady=(0, 5))
-        self.progress_bar.pack_forget() # Hide it initially
 
         self.image_frame = tk.Frame(main_frame, bg="#000000", relief=tk.SUNKEN, borderwidth=2)
         self.image_frame.pack(fill=tk.BOTH, expand=True)
@@ -79,12 +268,13 @@ class InspectionApp:
         # Frame 1: Main Buttons
         self.btn_load_image = ttk.Button(control_frame_1, text="1a. Load Image", command=self.load_image)
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
-        self.btn_load_video = ttk.Button(control_frame_1, text="1b. Load Video", command=self.load_video)
-        self.btn_load_video.pack(side=tk.LEFT, padx=5)
-        self.btn_capture_ids = ttk.Button(control_frame_1, text="1c. Capture IDS", command=self.capture_from_ids)
+        self.btn_capture_ids = ttk.Button(control_frame_1, text="1b. Capture IDS", command=self.capture_from_ids)
         self.btn_capture_ids.pack(side=tk.LEFT, padx=5)
+        self.btn_load_video = ttk.Button(control_frame_1, text="1c. Reconstruct Video", command=self.load_video_and_reconstruct)
+        self.btn_load_video.pack(side=tk.LEFT, padx=5)
+        
         self.btn_load_dxf = ttk.Button(control_frame_1, text="2. Load DXF", command=self.load_dxf)
-        self.btn_load_dxf.pack(side=tk.LEFT, padx=(15,5))
+        self.btn_load_dxf.pack(side=tk.LEFT, padx=(25,5))
         self.btn_visualize = ttk.Button(control_frame_1, text="Visualize", state=tk.DISABLED, command=self.run_visualization)
         self.btn_visualize.pack(side=tk.LEFT, padx=(20, 5))
         self.btn_inspect = ttk.Button(control_frame_1, text="Align (Affine)", state=tk.DISABLED, command=self.run_alignment_and_inspection)
@@ -128,7 +318,6 @@ class InspectionApp:
         self.lbl_extra_tol_val.pack(side=tk.LEFT, padx=(0, 20))
 
         # Crease Controls (Adaptive Threshold Method)
-        # CORRECTED Crease Controls Section
         self.lbl_block_size = tk.Label(crease_controls_container, text="Adaptive Block Size:", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_block_size.pack(side=tk.LEFT, padx=(15,5))
         self.block_size_var = tk.IntVar(value=25)
@@ -153,12 +342,14 @@ class InspectionApp:
         self.lbl_crease_fill_val = tk.Label(crease_controls_container, text="", bg=self.colors["bg"], fg=self.colors["accent"], width=6, anchor='w')
         self.lbl_crease_fill_val.pack(side=tk.LEFT, padx=0)
 
-        # Frame 4: Status Labels
+        # Frame 4: Status Labels and Progress Bar
         self.lbl_image_status = tk.Label(control_frame_4, text="Image: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
         self.lbl_image_status.pack(side=tk.LEFT)
         self.lbl_dxf_status = tk.Label(control_frame_4, text="DXF: None", bg=self.colors["bg"], fg=self.colors["fg"], padx=10)
         self.lbl_dxf_status.pack(side=tk.LEFT)
-
+        self.progress_bar = ttk.Progressbar(control_frame_4, orient='horizontal', length=300, mode='determinate')
+        self.progress_bar.pack(side=tk.RIGHT, padx=10, fill=tk.X, expand=True)
+        
         # Image Display Setup
         self.image_label = tk.Label(self.image_frame, bg="#000000")
         self.image_label.pack(fill=tk.BOTH, expand=True)
@@ -171,7 +362,6 @@ class InspectionApp:
         self.save_settings()
         cv2.destroyAllWindows()
         self.root.destroy()
-
 
     def save_settings(self):
         settings = {
@@ -206,15 +396,12 @@ class InspectionApp:
         finally:
             self._update_slider_labels()
 
-
-# CORRECTED _update_slider_labels method
     def _update_slider_labels(self, *args):
         # Enforce odd number for block size
         block_val = self.block_size_var.get()
         if block_val % 2 == 0:
             self.block_size_var.set(block_val + 1)
             
-        # This function now correctly updates ALL labels
         self.lbl_hole_occlusion_val.config(text=f"{self.hole_occlusion_tolerance_var.get():.1f}%")
         self.lbl_missing_tol_val.config(text=f"{self.missing_material_tolerance_var.get():.1f}%")
         self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
@@ -232,10 +419,46 @@ class InspectionApp:
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"], font=('Helvetica', 10))
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
-        # Style for the progress bar
-        style.configure("TProgressbar", troughcolor=self.colors['btn'], background=self.colors['accent'], thickness=10)
+        style.configure("Horizontal.TProgressbar", troughcolor=self.colors['btn'], background=self.colors['accent'])
 
-    
+    def load_video_and_reconstruct(self):
+        """
+        Handles the file dialog for video selection and triggers the reconstruction process.
+        """
+        filepath = filedialog.askopenfilename(title="Select a Video", filetypes=[("Video Files", "*.mp4 *.avi *.mov"), ("All files", "*.*")])
+        if not filepath:
+            return
+
+        self.root.config(cursor="watch")
+        self._update_progress(0)
+        self.root.update_idletasks()
+
+        try:
+            # Run the reconstruction 
+            reconstructed_image = self.reconstructor.run(filepath)
+            
+            if reconstructed_image is not None and reconstructed_image.shape[0] > 0 and reconstructed_image.shape[1] > 0:
+                self.original_cv_image = reconstructed_image
+                self.cv_image = self.original_cv_image.copy()
+                self.lbl_image_status.config(text="Image: Reconstructed from Video")
+                self.image_path = "Reconstructed_Video"  # Use a placeholder
+                self.update_image_display(self.cv_image)
+                self._check_files_loaded()
+                self.last_transform_matrix = None
+                messagebox.showinfo("Success", "Video reconstructed successfully.")
+            else:
+                messagebox.showerror("Error", "Video reconstruction failed. No object was fully reconstructed.")
+        except Exception as e:
+            messagebox.showerror("Reconstruction Error", f"An unexpected error occurred during reconstruction:\n\n{traceback.format_exc()}")
+        finally:
+            self.root.config(cursor="")
+            self._update_progress(0)
+
+    def _update_progress(self, value):
+        """Callback function to update the progress bar from the reconstructor."""
+        self.progress_bar['value'] = value
+        self.root.update_idletasks()
+
     def run_feature_specific_anomaly_detection(self):
         print("\n--- Starting Full Anomaly Detection ---")
         if self.last_transform_matrix is None or self.original_cv_image is None:
@@ -247,7 +470,6 @@ class InspectionApp:
         visualization_img = self.original_cv_image.copy()
         total_anomalies = 0
 
-        # Create a transparent overlay for clean crease visuals
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
 
         # --- 1. SETUP MASKS AND ALIGNED FEATURES ---
@@ -368,13 +590,10 @@ class InspectionApp:
 
         # --- 4. FINAL VISUALIZATION ---
         alpha_mask = cv2.cvtColor(overlay[:, :, 3], cv2.COLOR_GRAY2BGR) / 255.0
-        # Blend the crease overlays with the image that already has material defects drawn on it
         visualization_img = (visualization_img * (1 - alpha_mask) + overlay[:, :, :3] * alpha_mask).astype(np.uint8)
         
-        # Draw the base CAD outline on top for reference
         cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
 
-        # Draw the labels last so they are on top
         for text, pos, width in final_labels:
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
             text_pos = (pos[0] - tw // 2, pos[1] - width)
@@ -400,184 +619,6 @@ class InspectionApp:
         except Exception as e:
             messagebox.showerror("Image Load Error", f"Failed to load image: {e}")
             self.reset_image_state()
-
-    def load_video(self):
-        """ NEW: Loads a video and triggers the reconstruction process. """
-        filepath = filedialog.askopenfilename(
-            title="Select a Video File",
-            filetypes=[("Video Files", "*.mp4 *.avi *.mov"), ("All files", "*.*")]
-        )
-        if not filepath:
-            return
-
-        self.reset_image_state()
-        self.progress_bar.pack(fill=tk.X, side=tk.TOP, pady=(0, 5))
-        self.progress_bar['value'] = 0
-        self.root.update_idletasks()
-
-        try:
-            reconstructed_image = self._reconstruct_from_video(filepath)
-            if reconstructed_image is None:
-                messagebox.showerror("Video Error", "Could not reconstruct image from video. No valid frames found.")
-                return
-
-            self.original_cv_image = reconstructed_image
-            self.cv_image = self.original_cv_image.copy()
-            self.image_path = filepath
-            self.lbl_image_status.config(text=f"Video: {os.path.basename(self.image_path)}")
-            self.update_image_display(self.cv_image)
-            self._check_files_loaded()
-            self.last_transform_matrix = None
-            messagebox.showinfo("Success", "Image reconstructed from video successfully.")
-
-        except Exception as e:
-            messagebox.showerror("Video Processing Error", f"An error occurred: {traceback.format_exc()}")
-            self.reset_image_state()
-        finally:
-            self.progress_bar['value'] = 0
-            self.progress_bar.pack_forget()
-
-    def _reconstruct_from_video(self, video_path):
-        """ NEW: Reconstructs a single image from a video stream using template matching. """
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise IOError(f"Cannot open video file: {video_path}")
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.progress_bar['maximum'] = total_frames
-
-        full_image = None
-        prev_slice = None
-        processed_frames = 0
-        master_height = None
-        
-        # This counter will help reset if we lose the track for too long
-        consecutive_misses = 0
-
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            processed_frames += 1
-            self.progress_bar['value'] = processed_frames
-            self.root.update_idletasks()
-
-            current_slice = self._extract_slice_from_frame(frame)
-            if current_slice is None:
-                continue
-
-            if master_height is None:
-                if current_slice.shape[0] > 0:
-                    master_height = current_slice.shape[0]
-                else:
-                    continue
-
-            if current_slice.shape[0] != master_height:
-                current_aspect_ratio = current_slice.shape[1] / current_slice.shape[0]
-                new_width = int(master_height * current_aspect_ratio)
-                if new_width <= 0: continue
-                current_slice = cv2.resize(current_slice, (new_width, master_height), interpolation=cv2.INTER_AREA)
-
-            if full_image is None:
-                full_image = current_slice
-            else:
-                h, w = prev_slice.shape[:2]
-                template_width = min(w - 1, max(20, w // 5)) 
-                if template_width <= 0: 
-                    prev_slice = current_slice # Move on if the prev slice was too thin
-                    continue
-                
-                template = prev_slice[:, w - template_width:]
-
-                if current_slice.shape[1] < template.shape[1]:
-                    continue
-
-                res = cv2.matchTemplate(current_slice, template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(res)
-
-                # --- FIX: More tolerant confidence and logic ---
-                if max_val > 0.65: # Lowered threshold slightly
-                    consecutive_misses = 0 # We got a good match, reset the counter
-                    
-                    stitch_x = w - template_width + max_loc[0]
-                    
-                    # The only hard check: the new piece must be forward of the old one
-                    if stitch_x >= w:
-                        continue
-                        
-                    overlap_width = w - stitch_x
-                    if overlap_width <= 0: continue
-
-                    new_part = current_slice[:, overlap_width:]
-                    
-                    if new_part.shape[1] > 0 and full_image.shape[1] > overlap_width:
-                        overlap_region_full = full_image[:, -overlap_width:]
-                        overlap_region_new = current_slice[:, :overlap_width]
-                        
-                        alpha = np.linspace(0, 1, overlap_width)[np.newaxis, :, np.newaxis]
-                        blended_overlap = overlap_region_full * (1 - alpha) + overlap_region_new * alpha
-                        
-                        full_image = np.hstack((full_image[:, :-overlap_width], blended_overlap.astype(np.uint8), new_part))
-                    elif new_part.shape[1] > 0:
-                        full_image = np.hstack((full_image, new_part))
-                else:
-                    # If we fail to get a confident match, increment the miss counter
-                    consecutive_misses += 1
-                    # If we miss too many frames in a row, the object might be gone or the view is bad
-                    # To prevent getting stuck on a bad prev_slice, we can force it to update.
-                    if consecutive_misses > 10:
-                        # This will cause the next good frame to start a new "full_image"
-                        # Or, for a more continuous attempt, just update the slice and reset misses
-                        prev_slice = current_slice
-                        consecutive_misses = 0
-                        continue # Skip stitching for this frame
-            
-            prev_slice = current_slice
-
-        cap.release()
-        return full_image
-
-    def _extract_slice_from_frame(self, frame):
-        """ NEW: Helper to get the cardboard slice from a single video frame. """
-        if frame is None: return None
-
-        # --- FIX: Add constants for better slice validation ---
-        MIN_SLICE_HEIGHT = 50  # The detected slice must be at least 50 pixels tall
-        MIN_ASPECT_RATIO = 1.2 # The slice should be taller than it is wide
-
-        # Uses the same logic as find_image_contour but returns the cropped region
-        hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
-        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        
-        # Clean up mask
-        kernel = np.ones((5,5), np.uint8)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
-        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
-
-        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return None
-        
-        largest_contour = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest_contour) < 1000: return None
-        
-        x, y, w, h = cv2.boundingRect(largest_contour)
-
-        # --- FIX: Add new validation checks for the slice's shape ---
-        if h < MIN_SLICE_HEIGHT:
-            return None # Reject slices that are too short
-        
-        # Ensure width is not zero to avoid division errors
-        if w == 0:
-            return None
-
-        # Reject slices that are not taller than they are wide (adjust ratio as needed)
-        if (h / w) < MIN_ASPECT_RATIO:
-            return None
-        
-        return frame[y:y+h, x:x+w]
-
 
     def capture_from_ids(self):
         h_cam = ueye.HIDS(0) 
@@ -733,7 +774,7 @@ class InspectionApp:
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
                 points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
         except Exception as e:
-            print(f"               Warning: Could not process entity {dxf_type}: {e}")
+            print(f"Warning: Could not process entity {dxf_type}: {e}")
         return points
 
     def _assemble_paths(self, segments):
@@ -779,7 +820,7 @@ class InspectionApp:
         print("1. Preprocessing: Extracting and preparing contours...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
-            print("   Error: No contour found in the image.")
+            print("Error: No contour found in the image.")
             return None
         
         cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
@@ -791,26 +832,26 @@ class InspectionApp:
         
         coarse_transform_1 = self._align_with_moments(cad_contour_yflipped, img_contour)
         if coarse_transform_1 is None:
-                print("   Error: Coarse alignment failed on Pass 1.")
+                print("Error: Coarse alignment failed on Pass 1.")
                 return None
         
         final_transform_1, final_mse_1 = self._iterative_closest_point(source_points=cad_contour_yflipped, target_points=img_contour, initial_matrix=coarse_transform_1)
         if final_transform_1 is None:
-            print("   Error: ICP failed on Pass 1.")
+            print("Error: ICP failed on Pass 1.")
             return None
-        print(f"   Pass 1 (Y-Flipped) Complete. MSE: {final_mse_1:.4f}")
+        print(f"Pass 1 (Y-Flipped) Complete. MSE: {final_mse_1:.4f}")
 
         print("\n--- Starting Pass 2: Original (CAD Coordinate System) ---")
         coarse_transform_2 = self._align_with_moments(cad_contour_original, img_contour)
         if coarse_transform_2 is None:
-            print("   Error: Coarse alignment failed on Pass 2.")
+            print("Error: Coarse alignment failed on Pass 2.")
             return None
 
         final_transform_2, final_mse_2 = self._iterative_closest_point(source_points=cad_contour_original, target_points=img_contour, initial_matrix=coarse_transform_2)
         if final_transform_2 is None:
-            print("   Error: ICP failed on Pass 2.")
+            print("Error: ICP failed on Pass 2.")
             return None
-        print(f"   Pass 2 (Original) Complete. MSE: {final_mse_2:.4f}")
+        print(f"Pass 2 (Original) Complete. MSE: {final_mse_2:.4f}")
         
         if final_mse_1 < final_mse_2:
             print(f"\n--- Y-Flipped alignment is better (MSE {final_mse_1:.4f} < {final_mse_2:.4f}). ---")
@@ -834,12 +875,12 @@ class InspectionApp:
         cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         affine_mse = self._calculate_alignment_error(cad_contour, img_contour, M_affine)
         if affine_mse is None: return None, "Error"
-        print(f"   Benchmark Affine MSE: {affine_mse:.4f}")
+        print(f"Benchmark Affine MSE: {affine_mse:.4f}")
         print("4. Starting iterative homography refinement...")
         image_corners = self._extract_corners(img_contour, epsilon_factor=0.0015)
         cad_corners = self._extract_corners(cad_contour, epsilon_factor=0.0015)
         if image_corners is None or cad_corners is None or len(image_corners) < 4 or len(cad_corners) < 4:
-            print("   Error: Insufficient corners for homography. Falling back to affine.")
+            print("Error: Insufficient corners for homography. Falling back to affine.")
             final_matrix = np.vstack([M_affine, [0, 0, 1]])
             return final_matrix, "Affine Fallback (Not enough corners)"
         current_H = np.vstack([M_affine, [0, 0, 1]])
@@ -860,12 +901,12 @@ class InspectionApp:
             current_H = next_H
             previous_mse = current_mse
         homography_mse = previous_mse
-        print(f"   Final Homography MSE: {homography_mse:.4f}")
+        print(f"Final Homography MSE: {homography_mse:.4f}")
         if homography_mse < affine_mse:
-            print("   SUCCESS: Homography improved alignment. Using perspective transform.")
+            print("SUCCESS: Homography improved alignment. Using perspective transform.")
             return current_H, "Iterative Homography"
         else:
-            print("   INFO: Homography did not improve alignment. Falling back to affine transform.")
+            print("INFO: Homography did not improve alignment. Falling back to affine transform.")
             final_matrix = np.vstack([M_affine, [0, 0, 1]])
             return final_matrix, "Affine Fallback (MSE did not improve)"
 
@@ -883,7 +924,7 @@ class InspectionApp:
             distances, _ = kdtree.query(transformed_source)
             return np.mean(np.square(distances))
         except Exception as e:
-            print(f"   Error during MSE calculation: {e}")
+            print(f"Error during MSE calculation: {e}")
             return None
 
     def _extract_corners(self, contour, epsilon_factor=0.001):
@@ -908,7 +949,7 @@ class InspectionApp:
             ty = img_cy - (scale * (cad_cx * sin_a + cad_cy * cos_a))
             return np.array([[scale * cos_a, -scale * sin_a, tx], [scale * sin_a,  scale * cos_a, ty]], dtype=np.float32)
         except Exception as e:
-            print(f"   Error during moments-based alignment: {e}")
+            print(f"Error during moments-based alignment: {e}")
             return None
 
     def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
