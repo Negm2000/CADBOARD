@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, simpledialog
 from PIL import Image, ImageTk
 import cv2
 import ezdxf
@@ -10,10 +10,13 @@ import traceback
 import json
 from scipy.spatial import KDTree
 
+# Check for the ueye library and set a flag
 try:
     from pyueye import ueye
+    IS_IDS_CAMERA_AVAILABLE = True
 except ImportError:
     print("WARNING: pyueye library not found. IDS Camera functionality will be disabled.")
+    IS_IDS_CAMERA_AVAILABLE = False
     class MockUeye:
         def __getattr__(self, name):
             def method(*args, **kwargs):
@@ -39,6 +42,8 @@ class InspectionApp:
         self.last_transform_matrix = None
         self.last_transform_type = None
         self.settings_file = "settings.json"
+        
+        self.precomputed_mask = None
 
         # --- UI Colors and Styles ---
         self.colors = {
@@ -76,6 +81,17 @@ class InspectionApp:
         self.btn_load_image.pack(side=tk.LEFT, padx=5)
         self.btn_capture_ids = ttk.Button(control_frame_1, text="1b. Capture IDS", command=self.capture_from_ids)
         self.btn_capture_ids.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_capture_mog2_ids = ttk.Button(control_frame_1, text="1c. MOG2 (IDS)", command=self.capture_with_mog2_from_ids)
+        self.btn_capture_mog2_ids.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_capture_phone = ttk.Button(control_frame_1, text="1d. MOG2 (Phone)", command=self.capture_from_phone_stream)
+        self.btn_capture_phone.pack(side=tk.LEFT, padx=5)
+
+        if not IS_IDS_CAMERA_AVAILABLE:
+            self.btn_capture_ids.config(state=tk.DISABLED)
+            self.btn_capture_mog2_ids.config(state=tk.DISABLED)
+
         self.btn_load_dxf = ttk.Button(control_frame_1, text="2. Load DXF", command=self.load_dxf)
         self.btn_load_dxf.pack(side=tk.LEFT, padx=(15,5))
         self.btn_visualize = ttk.Button(control_frame_1, text="Visualize", state=tk.DISABLED, command=self.run_visualization)
@@ -121,7 +137,6 @@ class InspectionApp:
         self.lbl_extra_tol_val.pack(side=tk.LEFT, padx=(0, 20))
 
         # Crease Controls (Adaptive Threshold Method)
-        # CORRECTED Crease Controls Section
         self.lbl_block_size = tk.Label(crease_controls_container, text="Adaptive Block Size:", bg=self.colors["bg"], fg=self.colors["fg"])
         self.lbl_block_size.pack(side=tk.LEFT, padx=(15,5))
         self.block_size_var = tk.IntVar(value=25)
@@ -174,7 +189,7 @@ class InspectionApp:
             "block_size": self.block_size_var.get(),
             "c_constant": self.c_constant_var.get(),
             "min_crease_fill": self.min_crease_fill_var.get(),
-            "debug_mode": self.debug_mode.get()
+            "debug_mode": self.debug_mode.get(),
         }
         try:
             with open(self.settings_file, 'w') as f:
@@ -190,7 +205,6 @@ class InspectionApp:
                     self.missing_material_tolerance_var.set(settings.get("missing_material_tolerance", 0.5))
                     self.extra_material_tolerance_var.set(settings.get("extra_material_tolerance", 0.5))
                     self.block_size_var.set(settings.get("block_size", 25))
-                    self.block_size_slider.set(self.block_size_var.get())
                     self.c_constant_var.set(settings.get("c_constant", 7))
                     self.min_crease_fill_var.set(settings.get("min_crease_fill", 15.0))
                     self.debug_mode.set(settings.get("debug_mode", False))
@@ -199,15 +213,10 @@ class InspectionApp:
         finally:
             self._update_slider_labels()
 
-
-# CORRECTED _update_slider_labels method
     def _update_slider_labels(self, *args):
-        # Enforce odd number for block size
         block_val = self.block_size_var.get()
         if block_val % 2 == 0:
             self.block_size_var.set(block_val + 1)
-            
-        # This function now correctly updates ALL labels
         self.lbl_hole_occlusion_val.config(text=f"{self.hole_occlusion_tolerance_var.get():.1f}%")
         self.lbl_missing_tol_val.config(text=f"{self.missing_material_tolerance_var.get():.1f}%")
         self.lbl_extra_tol_val.config(text=f"{self.extra_material_tolerance_var.get():.1f}%")
@@ -225,8 +234,53 @@ class InspectionApp:
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"], font=('Helvetica', 10))
         style.configure("Horizontal.TScale", background=self.colors["bg"], troughcolor=self.colors["btn"])
-    
+        style.configure("TCombobox", fieldbackground=self.colors["btn"], background=self.colors["btn"], foreground=self.colors["fg"], arrowcolor=self.colors["fg"], bordercolor=self.colors["bg"])
+        style.map('TCombobox', fieldbackground=[('readonly', self.colors["btn"])], selectbackground=[('readonly', self.colors["btn"])], selectforeground=[('readonly', self.colors["fg"])])
+
+    # --- Feature Detection ---
+    def find_image_contour(self, image):
+        if self.precomputed_mask is not None:
+            print("Finding contour using precomputed MOG2 mask...")
+            contours, _ = cv2.findContours(self.precomputed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours: return None
+            largest_contour = max(contours, key=cv2.contourArea)
+            return largest_contour.astype(np.float32)
+
+        print("Finding contour using 'HSV Color' method...")
+        return self._find_contour_hsv(image)
+
+    def find_image_contours_with_holes(self, image):
+        if self.precomputed_mask is not None:
+            print("Finding contours with holes using precomputed MOG2 mask...")
+            contours, hierarchy = cv2.findContours(self.precomputed_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            return contours, hierarchy
+
+        print("Finding contours with holes using 'HSV Color' method...")
+        return self._find_contours_with_holes_hsv(image)
+
+    def _find_contour_hsv(self, image):
+        contours, _ = self._find_contours_with_holes_hsv(image)
+        if not contours: return None
+        return max(contours, key=cv2.contourArea).astype(np.float32)
+
+    def _find_contours_with_holes_hsv(self, image):
+        if image is None: return None, None
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
+        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
+        
+        kernel = np.ones((7,7), np.uint8)
+        cleaned_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+        if self.debug_mode.get():
+            self._resize_for_display("DEBUG: HSV Mask (Outline)", cleaned_mask)
+
+        return cv2.findContours(cleaned_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+
+    # --- Main Application Logic ---
     def run_feature_specific_anomaly_detection(self):
+        # ... (This function remains unchanged) ...
         print("\n--- Starting Full Anomaly Detection ---")
         if self.last_transform_matrix is None or self.original_cv_image is None:
             messagebox.showerror("Prerequisite Error", "Image must be loaded and aligned first.")
@@ -237,12 +291,9 @@ class InspectionApp:
         visualization_img = self.original_cv_image.copy()
         total_anomalies = 0
 
-        # Create a transparent overlay for clean crease visuals
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
-
-        # --- 1. SETUP MASKS AND ALIGNED FEATURES ---
         raw_image_mask = np.zeros((h, w), dtype=np.uint8)
-        image_contours_raw, hierarchy = self.find_image_contours_with_holes(self.original_cv_image)
+        image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
         if not image_contours_raw:
             messagebox.showerror("Detection Error", "Could not find any object contours in the image."); return
         cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
@@ -254,12 +305,10 @@ class InspectionApp:
         outline_area_mask = np.zeros((h, w), dtype=np.uint8)
         cv2.drawContours(outline_area_mask, [aligned_cad_outline_int], -1, 255, -1)
 
-        # --- 2. OUTLINE, MISSING/EXTRA MATERIAL, AND HOLE DEFECTS ---
         print(" - Checking for outline, hole, and material defects...")
         cleaned_physical_mask = cv2.bitwise_and(raw_image_mask, outline_area_mask)
         object_diagonal = math.sqrt(w**2 + h**2)
 
-        # Extra Material Check
         extra_tolerance_px = max(1, int(round(object_diagonal * (self.extra_material_tolerance_var.get() / 100.0))))
         kernel_dilate = np.ones((extra_tolerance_px, extra_tolerance_px), np.uint8)
         upper_bound_mask = cv2.dilate(outline_area_mask, kernel_dilate)
@@ -269,13 +318,12 @@ class InspectionApp:
             for contour in contours:
                 if cv2.contourArea(contour) < 4: continue
                 total_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1) # Orange fill for extra material
+                cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1)
                 M = cv2.moments(contour)
                 if M["m00"] != 0:
                     cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
                     cv2.putText(visualization_img, "Extra", (cx - 20, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
-        # Missing Material & Hole Occlusion Check
         missing_tolerance_px = max(1, int(round(object_diagonal * (self.missing_material_tolerance_var.get() / 100.0))))
         kernel_erode = np.ones((missing_tolerance_px, missing_tolerance_px), np.uint8)
         lower_bound_mask = cv2.erode(outline_area_mask, kernel_erode)
@@ -302,36 +350,33 @@ class InspectionApp:
                     M_hole = cv2.moments(expected_hole)
                     label_cx = int(M_hole["m10"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
                     label_cy = int(M_hole["m01"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
-                    cv2.drawContours(visualization_img, [expected_hole.astype(np.int32)], -1, (255, 100, 0), -1) # Blue fill for occluded hole
+                    cv2.drawContours(visualization_img, [expected_hole.astype(np.int32)], -1, (255, 100, 0), -1)
                     label = f"Occluded ({occlusion_ratio*100:.0f}%)"
                     cv2.putText(visualization_img, label, (label_cx - 50, label_cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2)
             
             for i, contour in enumerate(all_missing_contours):
                 if i in processed_contour_indices or cv2.contourArea(contour) < 5: continue
                 total_anomalies += 1
-                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1) # Red fill for missing material
+                cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1)
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
                     cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
                     cv2.putText(visualization_img, "Missing", (cx - 30, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
         
-        # --- 3. CREASE DEFECT DETECTION (ADAPTIVE THRESHOLD METHOD) ---
         print(" - Checking for crease defects...")
         gray_img = cv2.cvtColor(self.original_cv_image, cv2.COLOR_BGR2GRAY)
         blurred_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
         block_size = self.block_size_var.get()
         c_constant = self.c_constant_var.get()
         min_fill_percent = self.min_crease_fill_var.get()
-        
         adaptive_thresh_img = cv2.adaptiveThreshold(blurred_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, c_constant)
 
         if self.debug_mode.get():
-            self._resize_for_display("DEBUG: Adaptive Threshold Result", adaptive_thresh_img)
+            self._resize_for_display("DEBUG: Adaptive Threshold Result (Creases)", adaptive_thresh_img)
 
         final_labels = []
         for crease in self.cad_features['creases']:
             if crease.size < 4: continue
-
             transformed_crease_float = transform_func(crease.reshape(-1, 1, 2), self.last_transform_matrix)
             transformed_crease_int = transformed_crease_float.astype(np.int32)
             corridor_width = max(3, int(block_size / 3)) 
@@ -339,32 +384,23 @@ class InspectionApp:
             cv2.polylines(corridor_mask, [transformed_crease_int], False, 255, corridor_width)
             corridor_area = cv2.countNonZero(corridor_mask)
             if corridor_area == 0: continue
-
             detected_pixels_in_corridor = cv2.bitwise_and(adaptive_thresh_img, corridor_mask)
             fill_factor = (cv2.countNonZero(detected_pixels_in_corridor) / corridor_area) * 100
             is_ok = fill_factor >= min_fill_percent
-            
             fill_color = self.colors['pass_fill'] if is_ok else self.colors['fail_fill']
             cv2.polylines(overlay, [transformed_crease_int], False, fill_color, corridor_width)
-
             status = "OK"
             if not is_ok:
                 total_anomalies += 1
                 status = "Defect"
-            
             mid_point = tuple(transformed_crease_int[len(transformed_crease_int)//2][0])
             label_text = f"Fill: {fill_factor:.0f}% ({status})"
             final_labels.append((label_text, mid_point, corridor_width))
-
-        # --- 4. FINAL VISUALIZATION ---
-        alpha_mask = cv2.cvtColor(overlay[:, :, 3], cv2.COLOR_GRAY2BGR) / 255.0
-        # Blend the crease overlays with the image that already has material defects drawn on it
-        visualization_img = (visualization_img * (1 - alpha_mask) + overlay[:, :, :3] * alpha_mask).astype(np.uint8)
         
-        # Draw the base CAD outline on top for reference
+        alpha_mask = cv2.cvtColor(overlay[:, :, 3], cv2.COLOR_GRAY2BGR) / 255.0
+        visualization_img = (visualization_img * (1 - alpha_mask) + overlay[:, :, :3] * alpha_mask).astype(np.uint8)
         cv2.polylines(visualization_img, [aligned_cad_outline_int], True, (0, 255, 255), 1)
 
-        # Draw the labels last so they are on top
         for text, pos, width in final_labels:
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
             text_pos = (pos[0] - tw // 2, pos[1] - width)
@@ -385,6 +421,7 @@ class InspectionApp:
             self.cv_image = self.original_cv_image.copy()
             self.lbl_image_status.config(text=f"Image: {os.path.basename(self.image_path)}")
             self.update_image_display(self.cv_image)
+            self.precomputed_mask = None
             self._check_files_loaded()
             self.last_transform_matrix = None 
         except Exception as e:
@@ -398,20 +435,23 @@ class InspectionApp:
         try:
             ret = ueye.is_InitCamera(h_cam, None)
             if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", f"Could not initialize camera. Error code: {ret}"); return
+            
             sensor_info = ueye.SENSORINFO(); ueye.is_GetSensorInfo(h_cam, sensor_info)
             width, height = int(sensor_info.nMaxWidth), int(sensor_info.nMaxHeight)
             bits_per_pixel = 24
-            ret = ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
-            if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", "Could not set color mode. Is camera color?"); return
+            ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
             ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
             ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
-            ret = ueye.is_FreezeVideo(h_cam, ueye.IS_WAIT)
-            if ret != ueye.IS_SUCCESS: messagebox.showerror("IDS Camera Error", "Could not capture image from camera."); return
+            ueye.is_FreezeVideo(h_cam, ueye.IS_WAIT)
             array = ueye.get_data(mem_ptr, width, height, bits_per_pixel, width * bits_per_pixel // 8, copy=True)
+
             self.original_cv_image = np.reshape(array, (height, width, 3))
             self.cv_image = self.original_cv_image.copy()
             self.lbl_image_status.config(text="Image: From IDS Camera"); self.image_path = "IDS_Capture"
-            self.update_image_display(self.cv_image); self._check_files_loaded(); self.last_transform_matrix = None 
+            self.update_image_display(self.cv_image)
+            self.precomputed_mask = None
+            self._check_files_loaded()
+            self.last_transform_matrix = None 
             messagebox.showinfo("Success", "Image captured successfully from IDS camera.")
         except Exception as e:
             messagebox.showerror("IDS Camera Error", f"An unexpected error occurred: {traceback.format_exc()}")
@@ -419,7 +459,194 @@ class InspectionApp:
             if mem_ptr: ueye.is_FreeImageMem(h_cam, mem_ptr, mem_id)
             if h_cam: ueye.is_ExitCamera(h_cam)
 
+    def capture_from_phone_stream(self):
+        url = simpledialog.askstring("IP Camera Stream", "Enter the full phone camera stream URL:\n(e.g., http://192.168.1.100:8080/video)", parent=self.root)
+        if url:
+            self.capture_with_mog2(source=url)
+
+    def capture_with_mog2(self, source=0):
+        print(f"\n--- Initializing MOG2 Capture from source: {source} ---")
+        try:
+            cap = cv2.VideoCapture(source)
+            if not cap.isOpened():
+                raise IOError(f"Cannot open video source: {source}")
+        except Exception as e:
+            messagebox.showerror("Video Source Error", f"Could not open source. Please check the URL/device.\nError: {e}")
+            return
+        
+        fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
+        LEARNING_FRAMES = 150
+        frame_count = 0
+        last_mask, last_frame = None, None
+        
+        window_name = "MOG2 Capture - Position background, then introduce object. Press 'q' to capture."
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret: break
+            
+            frame_count += 1
+            if source == 0:
+                frame = cv2.flip(frame, 1)
+            last_frame = frame.copy()
+            
+            learning_rate = -1 if frame_count <= LEARNING_FRAMES else 0
+            fgmask = fgbg.apply(frame, learningRate=learning_rate)
+            
+            _, binary_mask = cv2.threshold(fgmask, 254, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((7,7), np.uint8)
+            cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            
+            contours, hierarchy = cv2.findContours(cleaned_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            hierarchical_mask = np.zeros(cleaned_mask.shape, dtype=np.uint8)
+            if contours:
+                contour_areas = [cv2.contourArea(c) for c in contours]
+                largest_contour_index = np.argmax(contour_areas)
+                cv2.drawContours(hierarchical_mask, contours, largest_contour_index, (255), thickness=cv2.FILLED)
+                if hierarchy is not None:
+                    for i, contour in enumerate(contours):
+                        if hierarchy[0][i][3] == largest_contour_index:
+                            cv2.drawContours(hierarchical_mask, [contour], -1, (0), thickness=cv2.FILLED)
+            last_mask = hierarchical_mask.copy()
+            
+            display_mask = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
+            if frame_count > LEARNING_FRAMES:
+                status_text, color = "Status: Background Locked", (0, 255, 0)
+            else:
+                status_text, color = f"Status: Learning... ({frame_count}/{LEARNING_FRAMES})", (0, 0, 255)
+            
+            cv2.putText(display_mask, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            combined_view = np.hstack((frame, display_mask))
+            
+            # Resize window
+            h_disp, w_disp = combined_view.shape[:2]
+            if w_disp > 1600:
+                new_w = 1600
+                new_h = int((new_w / w_disp) * h_disp)
+                combined_view = cv2.resize(combined_view, (new_w, new_h))
+                
+            cv2.imshow(window_name, combined_view)
+
+            if cv2.waitKey(30) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+        
+        if last_frame is not None and last_mask is not None:
+            print("--- MOG2 Capture Complete ---")
+            self.original_cv_image = last_frame
+            self.cv_image = last_frame.copy()
+            self.precomputed_mask = last_mask
+            self.lbl_image_status.config(text="Image: From MOG2 Capture")
+            self.image_path = "MOG2_Capture"
+            self.update_image_display(self.cv_image)
+            self._check_files_loaded()
+            self.last_transform_matrix = None
+        else:
+            messagebox.showwarning("Capture Warning", "No frame was captured from MOG2 process.")
+
+    def capture_with_mog2_from_ids(self):
+        print("\n--- Initializing MOG2 Capture from IDS Camera ---")
+        h_cam = ueye.HIDS(0) 
+        mem_ptr = ueye.c_mem_p()
+        mem_id = ueye.int()
+        
+        try:
+            ret = ueye.is_InitCamera(h_cam, None)
+            if ret != ueye.IS_SUCCESS:
+                messagebox.showerror("IDS Camera Error", f"Could not initialize camera. Error code: {ret}")
+                return
+
+            sensor_info = ueye.SENSORINFO()
+            ueye.is_GetSensorInfo(h_cam, sensor_info)
+            width, height = int(sensor_info.nMaxWidth), int(sensor_info.nMaxHeight)
+            bits_per_pixel = 24
+            
+            ueye.is_SetColorMode(h_cam, ueye.IS_CM_BGR8_PACKED)
+            ueye.is_AllocImageMem(h_cam, width, height, bits_per_pixel, mem_ptr, mem_id)
+            ueye.is_SetImageMem(h_cam, mem_ptr, mem_id)
+            
+            ueye.is_CaptureVideo(h_cam, ueye.IS_WAIT)
+            
+            fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
+            LEARNING_FRAMES = 150
+            frame_count = 0
+            last_mask, last_frame = None, None
+            
+            window_name = "IDS MOG2 Capture - Position background, then introduce object. Press 'q' to capture."
+            
+            while True:
+                array = ueye.get_data(mem_ptr, width, height, bits_per_pixel, width * bits_per_pixel // 8, copy=True)
+                frame = np.reshape(array, (height, width, 3))
+                
+                frame_count += 1
+                last_frame = frame.copy()
+                
+                learning_rate = -1 if frame_count <= LEARNING_FRAMES else 0
+                fgmask = fgbg.apply(frame, learningRate=learning_rate)
+                
+                _, binary_mask = cv2.threshold(fgmask, 254, 255, cv2.THRESH_BINARY)
+                kernel = np.ones((7,7), np.uint8)
+                cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+                contours, hierarchy = cv2.findContours(cleaned_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                hierarchical_mask = np.zeros(cleaned_mask.shape, dtype=np.uint8)
+                
+                if contours:
+                    contour_areas = [cv2.contourArea(c) for c in contours]
+                    largest_contour_index = np.argmax(contour_areas)
+                    cv2.drawContours(hierarchical_mask, contours, largest_contour_index, (255), thickness=cv2.FILLED)
+                    if hierarchy is not None:
+                        for i, contour in enumerate(contours):
+                            if hierarchy[0][i][3] == largest_contour_index:
+                                cv2.drawContours(hierarchical_mask, [contour], -1, (0), thickness=cv2.FILLED)
+
+                last_mask = hierarchical_mask.copy()
+                
+                display_mask = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
+                if frame_count > LEARNING_FRAMES:
+                    status_text, color = "Status: Background Locked", (0, 255, 0)
+                else:
+                    status_text, color = f"Status: Learning... ({frame_count}/{LEARNING_FRAMES})", (0, 0, 255)
+                
+                cv2.putText(display_mask, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                combined_view = np.hstack((frame, display_mask))
+                h_disp, w_disp = combined_view.shape[:2]
+                if w_disp > 1600:
+                    new_w = 1600
+                    new_h = int((new_w / w_disp) * h_disp)
+                    combined_view = cv2.resize(combined_view, (new_w, new_h))
+
+                cv2.imshow(window_name, combined_view)
+
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        
+        except Exception as e:
+            messagebox.showerror("IDS MOG2 Error", f"An unexpected error occurred during capture:\n{traceback.format_exc()}")
+        finally:
+            ueye.is_StopLiveVideo(h_cam, ueye.IS_WAIT)
+            if mem_ptr: ueye.is_FreeImageMem(h_cam, mem_ptr, mem_id)
+            if h_cam: ueye.is_ExitCamera(h_cam)
+            cv2.destroyAllWindows()
+            
+        if last_frame is not None and last_mask is not None:
+            print("--- MOG2 Capture Complete ---")
+            self.original_cv_image = last_frame
+            self.cv_image = last_frame.copy()
+            self.precomputed_mask = last_mask
+            self.lbl_image_status.config(text="Image: From MOG2 Capture (IDS)")
+            self.image_path = "MOG2_IDS_Capture"
+            self.update_image_display(self.cv_image)
+            self._check_files_loaded()
+            self.last_transform_matrix = None
+        else:
+            messagebox.showwarning("Capture Warning", "No frame was captured from MOG2 process.")
+
     def load_dxf(self):
+        # ... (This function remains unchanged) ...
         filepath = filedialog.askopenfilename(title="Select a DXF File", filetypes=[("DXF Files", "*.dxf"), ("All files", "*.*")])
         if not filepath: return
         self.dxf_path = filepath
@@ -450,6 +677,7 @@ class InspectionApp:
             self.reset_dxf_state()
 
     def run_alignment_and_inspection(self):
+        # ... (This function remains unchanged) ...
         print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
         transform_matrix = self.align_with_moments_icp_pipeline()
         if transform_matrix is None:
@@ -476,6 +704,7 @@ class InspectionApp:
         messagebox.showinfo("Inspection Complete", "DXF features aligned using the Affine (Moments+ICP) pipeline.")
 
     def run_homography_inspection(self):
+        # ... (This function remains unchanged) ...
         print("\n--- Starting Smart Homography Alignment ---")
         homography_matrix, method_used = self.align_with_homography_pipeline()
         
@@ -531,6 +760,7 @@ class InspectionApp:
         self.image_label.config(image=self.tk_image)
         
     def _extract_entity_points(self, entity):
+        # ... (This function remains unchanged) ...
         points = []
         dxf_type = entity.dxftype()
         try:
@@ -549,6 +779,7 @@ class InspectionApp:
         return points
 
     def _assemble_paths(self, segments):
+        # ... (This function remains unchanged) ...
         if not segments: return []
         paths = []
         tolerance = 1e-6
@@ -575,6 +806,7 @@ class InspectionApp:
 
     def reset_image_state(self):
         self.image_path, self.cv_image, self.original_cv_image = None, None, None
+        self.precomputed_mask = None
         self.lbl_image_status.config(text="Image: None")
         self.image_label.config(image='')
         self.last_transform_matrix = None
@@ -588,6 +820,7 @@ class InspectionApp:
         self._check_files_loaded()
 
     def align_with_moments_icp_pipeline(self):
+        # ... (This function remains unchanged) ...
         print("1. Preprocessing: Extracting and preparing contours...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
@@ -636,6 +869,7 @@ class InspectionApp:
             return final_transform_2
 
     def align_with_homography_pipeline(self):
+        # ... (This function remains unchanged) ...
         print("--- Starting Smart Homography Pipeline (with MSE convergence) ---")
         print("1. Calculating baseline affine transformation...")
         M_affine = self.align_with_moments_icp_pipeline()
@@ -682,6 +916,7 @@ class InspectionApp:
             return final_matrix, "Affine Fallback (MSE did not improve)"
 
     def _calculate_alignment_error(self, source_contour, target_contour, transform_matrix):
+        # ... (This function remains unchanged) ...
         if source_contour is None or target_contour is None or transform_matrix is None: return None
         if transform_matrix.shape == (2, 3):
             transformed_source = cv2.transform(source_contour.reshape(-1, 1, 2), transform_matrix)
@@ -699,12 +934,14 @@ class InspectionApp:
             return None
 
     def _extract_corners(self, contour, epsilon_factor=0.001):
+        # ... (This function remains unchanged) ...
         if contour is None or len(contour) < 3: return None
         epsilon = epsilon_factor * cv2.arcLength(contour, True)
         corners = cv2.approxPolyDP(contour, epsilon, True)
         return corners.reshape(-1, 2) if corners is not None else None
 
     def _align_with_moments(self, cad_contour, img_contour):
+        # ... (This function remains unchanged) ...
         try:
             M_cad = cv2.moments(cad_contour)
             M_img = cv2.moments(img_contour)
@@ -724,6 +961,7 @@ class InspectionApp:
             return None
 
     def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
+        # ... (This function remains unchanged) ...
         if initial_matrix is None: return None, float('inf')
         source_pts, target_pts = source_points.reshape(-1, 2), target_points.reshape(-1, 2)
         if len(source_pts) == 0 or len(target_pts) == 0: return None, float('inf')
@@ -743,25 +981,8 @@ class InspectionApp:
             prev_error = mean_error
         return current_transform, prev_error
 
-    def find_image_contour(self, image):
-        if image is None: return None
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
-        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return None
-        largest_contour = max(contours, key=cv2.contourArea)
-        return largest_contour.astype(np.float32) if largest_contour is not None else None
-
-    def find_image_contours_with_holes(self, image):
-        if image is None: return None, None
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower_bound_hsv, upper_bound_hsv = np.array([5, 50, 50]), np.array([50, 255, 255])
-        color_mask = cv2.inRange(hsv_image, lower_bound_hsv, upper_bound_hsv)
-        contours, hierarchy = cv2.findContours(color_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        return contours, hierarchy
-
     def run_visualization(self):
+        # ... (This function remains unchanged) ...
         print("--- Running Input Visualization ---")
         if self.cad_features['outline'].size > 0:
             all_points_list = [self.cad_features['outline']] + self.cad_features['holes'] + self.cad_features['creases']
@@ -791,10 +1012,11 @@ class InspectionApp:
                 cv2.drawContours(debug_image, [image_contour.astype(np.int32)], -1, (255, 0, 255), 3)
                 self._resize_for_display("DEBUG: Detected Image Contour", debug_image)
             else:
-                messagebox.showinfo("Visualize", "No contour detected in image with current HSV settings.")
+                messagebox.showinfo("Visualize", "No contour detected in the image.")
         messagebox.showinfo("Debug", "Debug windows opened.")
 
     def _resize_for_display(self, window_name, image, max_dim=900):
+        # ... (This function remains unchanged) ...
         h, w = image.shape[:2]
         if max_dim <= 0: max_dim=900
         if h > max_dim or w > max_dim:

@@ -1,5 +1,5 @@
 {
-    "hole_occlusion_tolerance": 14.983333333333334,
+    "hole_occlusion_tolerance": 34.95,
     "missing_material_tolerance": 0.835,
     "extra_material_tolerance": 0.7533333333333333,
     "block_size": 61,
