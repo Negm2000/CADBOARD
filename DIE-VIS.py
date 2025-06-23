@@ -42,7 +42,8 @@ class InspectionApp:
         self.last_transform_matrix = None
         self.last_transform_type = None
         self.settings_file = "settings.json"
-        
+        self.last_ip_url = "http://" # Add state for last used IP
+
         self.precomputed_mask = None
 
         # --- UI Colors and Styles ---
@@ -190,6 +191,7 @@ class InspectionApp:
             "c_constant": self.c_constant_var.get(),
             "min_crease_fill": self.min_crease_fill_var.get(),
             "debug_mode": self.debug_mode.get(),
+            "last_ip_url": self.last_ip_url, # Save the last used IP
         }
         try:
             with open(self.settings_file, 'w') as f:
@@ -208,6 +210,7 @@ class InspectionApp:
                     self.c_constant_var.set(settings.get("c_constant", 7))
                     self.min_crease_fill_var.set(settings.get("min_crease_fill", 15.0))
                     self.debug_mode.set(settings.get("debug_mode", False))
+                    self.last_ip_url = settings.get("last_ip_url", "http://") # Load the last used IP
         except Exception as e:
             print(f"Error loading settings, using defaults. Error: {e}")
         finally:
@@ -252,6 +255,7 @@ class InspectionApp:
     def find_image_contours_with_holes(self, image):
         if self.precomputed_mask is not None:
             print("Finding contours with holes using precomputed MOG2 mask...")
+            # Use RETR_CCOMP to get holes
             contours, hierarchy = cv2.findContours(self.precomputed_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
             return contours, hierarchy
 
@@ -272,6 +276,7 @@ class InspectionApp:
         if self.debug_mode.get():
             self._resize_for_display("DEBUG: HSV Mask (Outline)", color_mask)
 
+        # Use RETR_CCOMP to get holes
         return cv2.findContours(color_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
     # --- Main Application Logic ---
@@ -456,18 +461,31 @@ class InspectionApp:
             if h_cam: ueye.is_ExitCamera(h_cam)
 
     def capture_from_phone_stream(self):
-        url = simpledialog.askstring("IP Camera Stream", "Enter the full phone camera stream URL:\n(e.g., http://192.168.1.100:8080/video)", parent=self.root)
+        # Ask for URL, pre-filling with the last known one
+        url = simpledialog.askstring("IP Camera Stream", 
+                                     "Enter the full phone camera stream URL:\n(e.g., http://192.168.1.100:8080/video)", 
+                                     parent=self.root,
+                                     initialvalue=self.last_ip_url)
         if url:
+            # The capture_with_mog2 function will handle saving the URL on success
             self.capture_with_mog2(source=url)
 
     def capture_with_mog2(self, source=0):
         print(f"\n--- Initializing MOG2 Capture from source: {source} ---")
+        cap = None
         try:
             cap = cv2.VideoCapture(source)
             if not cap.isOpened():
                 raise IOError(f"Cannot open video source: {source}")
+            
+            # If we successfully opened a string source, it's a valid URL. Save it.
+            if isinstance(source, str):
+                self.last_ip_url = source
+                print(f"    Successfully connected to {source}. Saved as default for next time.")
+
         except Exception as e:
             messagebox.showerror("Video Source Error", f"Could not open source. Please check the URL/device.\nError: {e}")
+            if cap: cap.release()
             return
         
         fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
@@ -482,30 +500,42 @@ class InspectionApp:
             if not ret: break
             
             frame_count += 1
-            if source == 0:
+            if source == 0: # Flip webcam image
                 frame = cv2.flip(frame, 1)
             last_frame = frame.copy()
             
             learning_rate = -1 if frame_count <= LEARNING_FRAMES else 0
             fgmask = fgbg.apply(frame, learningRate=learning_rate)
             
+            # Remove shadows (gray values)
             _, binary_mask = cv2.threshold(fgmask, 254, 255, cv2.THRESH_BINARY)
-            kernel = np.ones((3,3), np.uint8)
-            cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-            cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel, iterations=2)
             
+            # --- MODIFICATION: Use contour hierarchy and area to clean the mask ---
+            contours, hierarchy = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            hierarchical_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
             
-            contours, hierarchy = cv2.findContours(cleaned_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            hierarchical_mask = np.zeros(cleaned_mask.shape, dtype=np.uint8)
             if contours:
                 contour_areas = [cv2.contourArea(c) for c in contours]
-                largest_contour_index = np.argmax(contour_areas)
-                cv2.drawContours(hierarchical_mask, contours, largest_contour_index, (255), thickness=cv2.FILLED)
-                if hierarchy is not None:
-                    for i, contour in enumerate(contours):
-                        if hierarchy[0][i][3] == largest_contour_index:
-                            cv2.drawContours(hierarchical_mask, [contour], -1, (0), thickness=cv2.FILLED)
+                if not contour_areas: # If all contours have zero area
+                    last_mask = hierarchical_mask.copy()
+                else:
+                    largest_contour_index = np.argmax(contour_areas)
+                    
+                    # Draw the largest contour (the object) as white
+                    cv2.drawContours(hierarchical_mask, contours, largest_contour_index, 255, thickness=cv2.FILLED)
+                    
+                    # Define a minimum area for a contour to be considered a significant hole
+                    min_hole_area = 25 # pixels^2 - adjust if needed
+                    
+                    # Draw any child contours (holes) as black IF they are significant
+                    if hierarchy is not None:
+                        for i, contour in enumerate(contours):
+                            # Check if the contour is a child of the largest one AND is big enough
+                            if hierarchy[0][i][3] == largest_contour_index and cv2.contourArea(contour) > min_hole_area:
+                                cv2.drawContours(hierarchical_mask, [contour], -1, 0, thickness=cv2.FILLED)
+            
             last_mask = hierarchical_mask.copy()
+            # --- END MODIFICATION ---
             
             display_mask = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
             if frame_count > LEARNING_FRAMES:
@@ -516,7 +546,6 @@ class InspectionApp:
             cv2.putText(display_mask, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             combined_view = np.hstack((frame, display_mask))
             
-            # Resize window
             h_disp, w_disp = combined_view.shape[:2]
             if w_disp > 1600:
                 new_w = 1600
@@ -585,22 +614,32 @@ class InspectionApp:
                 fgmask = fgbg.apply(frame, learningRate=learning_rate)
                 
                 _, binary_mask = cv2.threshold(fgmask, 254, 255, cv2.THRESH_BINARY)
-                kernel = np.ones((7,7), np.uint8)
-                cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-                contours, hierarchy = cv2.findContours(cleaned_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-                hierarchical_mask = np.zeros(cleaned_mask.shape, dtype=np.uint8)
+                # --- MODIFICATION: Use contour hierarchy and area to clean the mask ---
+                contours, hierarchy = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                hierarchical_mask = np.zeros(binary_mask.shape, dtype=np.uint8)
                 
                 if contours:
                     contour_areas = [cv2.contourArea(c) for c in contours]
-                    largest_contour_index = np.argmax(contour_areas)
-                    cv2.drawContours(hierarchical_mask, contours, largest_contour_index, (255), thickness=cv2.FILLED)
-                    if hierarchy is not None:
-                        for i, contour in enumerate(contours):
-                            if hierarchy[0][i][3] == largest_contour_index:
-                                cv2.drawContours(hierarchical_mask, [contour], -1, (0), thickness=cv2.FILLED)
+                    if not contour_areas: # If all contours have zero area
+                         last_mask = hierarchical_mask.copy()
+                    else:
+                        largest_contour_index = np.argmax(contour_areas)
+                        
+                        # Draw the largest contour (the object) as white
+                        cv2.drawContours(hierarchical_mask, contours, largest_contour_index, (255), thickness=cv2.FILLED)
+                        
+                        # Define a minimum area for a contour to be considered a significant hole
+                        min_hole_area = 25 # pixels^2 - adjust if needed
+
+                        # Draw any child contours (holes) as black IF they are significant
+                        if hierarchy is not None:
+                            for i, contour in enumerate(contours):
+                                if hierarchy[0][i][3] == largest_contour_index and cv2.contourArea(contour) > min_hole_area:
+                                    cv2.drawContours(hierarchical_mask, [contour], -1, (0), thickness=cv2.FILLED)
 
                 last_mask = hierarchical_mask.copy()
+                # --- END MODIFICATION ---
                 
                 display_mask = cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR)
                 if frame_count > LEARNING_FRAMES:
@@ -773,7 +812,7 @@ class InspectionApp:
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
                 points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
         except Exception as e:
-            print(f"               Warning: Could not process entity {dxf_type}: {e}")
+            print(f"                Warning: Could not process entity {dxf_type}: {e}")
         return points
 
     def _assemble_paths(self, segments):
@@ -822,7 +861,7 @@ class InspectionApp:
         print("1. Preprocessing: Extracting and preparing contours...")
         img_contour = self.find_image_contour(self.original_cv_image)
         if img_contour is None:
-            print("   Error: No contour found in the image.")
+            print("  Error: No contour found in the image.")
             return None
         
         cad_contour_original = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
@@ -834,26 +873,26 @@ class InspectionApp:
         
         coarse_transform_1 = self._align_with_moments(cad_contour_yflipped, img_contour)
         if coarse_transform_1 is None:
-                print("   Error: Coarse alignment failed on Pass 1.")
+                print("  Error: Coarse alignment failed on Pass 1.")
                 return None
         
         final_transform_1, final_mse_1 = self._iterative_closest_point(source_points=cad_contour_yflipped, target_points=img_contour, initial_matrix=coarse_transform_1)
         if final_transform_1 is None:
-            print("   Error: ICP failed on Pass 1.")
+            print("  Error: ICP failed on Pass 1.")
             return None
-        print(f"   Pass 1 (Y-Flipped) Complete. MSE: {final_mse_1:.4f}")
+        print(f"  Pass 1 (Y-Flipped) Complete. MSE: {final_mse_1:.4f}")
 
         print("\n--- Starting Pass 2: Original (CAD Coordinate System) ---")
         coarse_transform_2 = self._align_with_moments(cad_contour_original, img_contour)
         if coarse_transform_2 is None:
-            print("   Error: Coarse alignment failed on Pass 2.")
+            print("  Error: Coarse alignment failed on Pass 2.")
             return None
 
         final_transform_2, final_mse_2 = self._iterative_closest_point(source_points=cad_contour_original, target_points=img_contour, initial_matrix=coarse_transform_2)
         if final_transform_2 is None:
-            print("   Error: ICP failed on Pass 2.")
+            print("  Error: ICP failed on Pass 2.")
             return None
-        print(f"   Pass 2 (Original) Complete. MSE: {final_mse_2:.4f}")
+        print(f"  Pass 2 (Original) Complete. MSE: {final_mse_2:.4f}")
         
         if final_mse_1 < final_mse_2:
             print(f"\n--- Y-Flipped alignment is better (MSE {final_mse_1:.4f} < {final_mse_2:.4f}). ---")
@@ -878,12 +917,12 @@ class InspectionApp:
         cad_contour = self.cad_features['outline'].reshape(-1, 2).astype(np.float32)
         affine_mse = self._calculate_alignment_error(cad_contour, img_contour, M_affine)
         if affine_mse is None: return None, "Error"
-        print(f"   Benchmark Affine MSE: {affine_mse:.4f}")
+        print(f"  Benchmark Affine MSE: {affine_mse:.4f}")
         print("4. Starting iterative homography refinement...")
         image_corners = self._extract_corners(img_contour, epsilon_factor=0.0015)
         cad_corners = self._extract_corners(cad_contour, epsilon_factor=0.0015)
         if image_corners is None or cad_corners is None or len(image_corners) < 4 or len(cad_corners) < 4:
-            print("   Error: Insufficient corners for homography. Falling back to affine.")
+            print("  Error: Insufficient corners for homography. Falling back to affine.")
             final_matrix = np.vstack([M_affine, [0, 0, 1]])
             return final_matrix, "Affine Fallback (Not enough corners)"
         current_H = np.vstack([M_affine, [0, 0, 1]])
@@ -904,12 +943,12 @@ class InspectionApp:
             current_H = next_H
             previous_mse = current_mse
         homography_mse = previous_mse
-        print(f"   Final Homography MSE: {homography_mse:.4f}")
+        print(f"  Final Homography MSE: {homography_mse:.4f}")
         if homography_mse < affine_mse:
-            print("   SUCCESS: Homography improved alignment. Using perspective transform.")
+            print("  SUCCESS: Homography improved alignment. Using perspective transform.")
             return current_H, "Iterative Homography"
         else:
-            print("   INFO: Homography did not improve alignment. Falling back to affine transform.")
+            print("  INFO: Homography did not improve alignment. Falling back to affine transform.")
             final_matrix = np.vstack([M_affine, [0, 0, 1]])
             return final_matrix, "Affine Fallback (MSE did not improve)"
 
@@ -928,7 +967,7 @@ class InspectionApp:
             distances, _ = kdtree.query(transformed_source)
             return np.mean(np.square(distances))
         except Exception as e:
-            print(f"   Error during MSE calculation: {e}")
+            print(f"  Error during MSE calculation: {e}")
             return None
 
     def _extract_corners(self, contour, epsilon_factor=0.001):
@@ -955,7 +994,7 @@ class InspectionApp:
             ty = img_cy - (scale * (cad_cx * sin_a + cad_cy * cos_a))
             return np.array([[scale * cos_a, -scale * sin_a, tx], [scale * sin_a,  scale * cos_a, ty]], dtype=np.float32)
         except Exception as e:
-            print(f"   Error during moments-based alignment: {e}")
+            print(f"  Error during moments-based alignment: {e}")
             return None
 
     def _iterative_closest_point(self, source_points, target_points, initial_matrix, max_iterations=100, tolerance=1e-5):
