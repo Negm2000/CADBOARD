@@ -9,6 +9,7 @@ import os
 import traceback
 import json
 from scipy.spatial import KDTree
+import time # <-- Added for performance timing
 
 # Check for the ueye library and set a flag
 try:
@@ -281,8 +282,9 @@ class InspectionApp:
 
     # --- Main Application Logic ---
     def run_feature_specific_anomaly_detection(self):
-        # ... (This function remains unchanged) ...
         print("\n--- Starting Full Anomaly Detection ---")
+        t_start_anomaly_check = time.time() # Start timer for the entire function
+        
         if self.last_transform_matrix is None or self.original_cv_image is None:
             messagebox.showerror("Prerequisite Error", "Image must be loaded and aligned first.")
             return
@@ -290,11 +292,22 @@ class InspectionApp:
         h, w = self.original_cv_image.shape[:2]
         transform_func = cv2.transform if self.last_transform_type == 'affine' else cv2.perspectiveTransform
         visualization_img = self.original_cv_image.copy()
-        total_anomalies = 0
-
+        
+        # --- Anomaly Counters ---
+        extra_material_anomalies = 0
+        missing_material_anomalies = 0
+        hole_anomalies = 0
+        crease_defects = 0
+        
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         raw_image_mask = np.zeros((h, w), dtype=np.uint8)
+
+        t_start_contour_holes = time.time()
         image_contours_raw, _ = self.find_image_contours_with_holes(self.original_cv_image)
+        if self.debug_mode.get():
+            elapsed_contour_holes = time.time() - t_start_contour_holes
+            print(f"[DEBUG] T_ContourDetect (w/Holes): {elapsed_contour_holes:.4f} seconds")
+
         if not image_contours_raw:
             messagebox.showerror("Detection Error", "Could not find any object contours in the image."); return
         cv2.drawContours(raw_image_mask, image_contours_raw, -1, 255, cv2.FILLED)
@@ -318,7 +331,7 @@ class InspectionApp:
         if contours:
             for contour in contours:
                 if cv2.contourArea(contour) < 4: continue
-                total_anomalies += 1
+                extra_material_anomalies += 1
                 cv2.drawContours(visualization_img, [contour], -1, (0, 165, 255), -1)
                 M = cv2.moments(contour)
                 if M["m00"] != 0:
@@ -347,7 +360,7 @@ class InspectionApp:
                 presence_ratio = min(1.0, total_detected_area_in_hole / expected_hole_area if expected_hole_area > 0 else 0.0)
                 occlusion_ratio = 1.0 - presence_ratio
                 if occlusion_ratio > (self.hole_occlusion_tolerance_var.get() / 100.0):
-                    total_anomalies += 1
+                    hole_anomalies += 1
                     M_hole = cv2.moments(expected_hole)
                     label_cx = int(M_hole["m10"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
                     label_cy = int(M_hole["m01"] / M_hole["m00"]) if M_hole["m00"] > 0 else 0
@@ -357,7 +370,7 @@ class InspectionApp:
             
             for i, contour in enumerate(all_missing_contours):
                 if i in processed_contour_indices or cv2.contourArea(contour) < 5: continue
-                total_anomalies += 1
+                missing_material_anomalies += 1
                 cv2.drawContours(visualization_img, [contour], -1, (0, 0, 255), -1)
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
@@ -392,7 +405,7 @@ class InspectionApp:
             cv2.polylines(overlay, [transformed_crease_int], False, fill_color, corridor_width)
             status = "OK"
             if not is_ok:
-                total_anomalies += 1
+                crease_defects += 1
                 status = "Defect"
             mid_point = tuple(transformed_crease_int[len(transformed_crease_int)//2][0])
             label_text = f"Fill: {fill_factor:.0f}% ({status})"
@@ -408,8 +421,26 @@ class InspectionApp:
             cv2.putText(visualization_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,0), 4, cv2.LINE_AA)
             cv2.putText(visualization_img, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,255), 1, cv2.LINE_AA)
 
+        total_anomalies = extra_material_anomalies + missing_material_anomalies + hole_anomalies + crease_defects
+        
+        # --- Create Summary and Display ---
+        summary_message = (
+            f"Found {total_anomalies} total potential anomalies.\n\n"
+            f"--- Anomaly Summary ---\n"
+            f"Extra Material Defects: {extra_material_anomalies}\n"
+            f"Missing Material Defects: {missing_material_anomalies}\n"
+            f"Occluded / Faulty Holes: {hole_anomalies} / {len(aligned_cad_holes)}\n"
+            f"Crease Defects: {crease_defects} / {len(self.cad_features['creases'])}"
+        )
+        
+        if self.debug_mode.get():
+            elapsed_anomaly = time.time() - t_start_anomaly_check
+            print(f"[DEBUG] T_AnomalyCheck: {elapsed_anomaly:.4f} seconds")
+            print(f"[DEBUG] --- ANOMALY SUMMARY ---\n{summary_message.replace('--- Anomaly Summary ---\\n', '')}")
+
+
         self.update_image_display(visualization_img)
-        messagebox.showinfo("Inspection Complete", f"Found {total_anomalies} total potential anomalies.")
+        messagebox.showinfo("Inspection Complete", summary_message)
         print(f"--- Anomaly Detection Complete: {total_anomalies} issues found. ---")
     
     def load_image(self):
@@ -463,9 +494,9 @@ class InspectionApp:
     def capture_from_phone_stream(self):
         # Ask for URL, pre-filling with the last known one
         url = simpledialog.askstring("IP Camera Stream", 
-                                     "Enter the full phone camera stream URL:\n(e.g., http://192.168.1.100:8080/video)", 
-                                     parent=self.root,
-                                     initialvalue=self.last_ip_url)
+                                      "Enter the full phone camera stream URL:\n(e.g., http://192.168.1.100:8080/video)", 
+                                      parent=self.root,
+                                      initialvalue=self.last_ip_url)
         if url:
             # The capture_with_mog2 function will handle saving the URL on success
             self.capture_with_mog2(source=url)
@@ -480,7 +511,7 @@ class InspectionApp:
             
             if isinstance(source, str):
                 self.last_ip_url = source
-                print(f"    Successfully connected to {source}. Saved as default for next time.")
+                print(f"      Successfully connected to {source}. Saved as default for next time.")
 
         except Exception as e:
             messagebox.showerror("Video Source Error", f"Could not open source. Please check the URL/device.\nError: {e}")
@@ -637,9 +668,14 @@ class InspectionApp:
             self.reset_dxf_state()
 
     def run_alignment_and_inspection(self):
-        # ... (This function remains unchanged) ...
         print("\n--- Starting Alignment & Inspection (Affine/Moments+ICP Pipeline) ---")
+        t_start_align = time.time()
         transform_matrix = self.align_with_moments_icp_pipeline()
+        
+        if self.debug_mode.get():
+            elapsed_align = time.time() - t_start_align
+            print(f"[DEBUG] T_Alignment (Affine): {elapsed_align:.4f} seconds")
+
         if transform_matrix is None:
             messagebox.showerror("Alignment Error", "Could not compute the transformation matrix.")
             self.last_transform_matrix = None
@@ -664,9 +700,13 @@ class InspectionApp:
         messagebox.showinfo("Inspection Complete", "DXF features aligned using the Affine (Moments+ICP) pipeline.")
 
     def run_homography_inspection(self):
-        # ... (This function remains unchanged) ...
         print("\n--- Starting Smart Homography Alignment ---")
+        t_start_homography = time.time()
         homography_matrix, method_used = self.align_with_homography_pipeline()
+
+        if self.debug_mode.get():
+            elapsed_homography = time.time() - t_start_homography
+            print(f"[DEBUG] T_Alignment (Homography): {elapsed_homography:.4f} seconds")
         
         if homography_matrix is None:
             messagebox.showerror("Alignment Error", "Could not compute the homography matrix.")
@@ -735,7 +775,7 @@ class InspectionApp:
             elif dxf_type in ('CIRCLE', 'ARC', 'ELLIPSE', 'SPLINE'):
                 points = [(p.x, p.y) for p in entity.flattening(sagitta=0.01)]
         except Exception as e:
-            print(f"                Warning: Could not process entity {dxf_type}: {e}")
+            print(f"                         Warning: Could not process entity {dxf_type}: {e}")
         return points
 
     def _assemble_paths(self, segments):
@@ -780,9 +820,14 @@ class InspectionApp:
         self._check_files_loaded()
 
     def align_with_moments_icp_pipeline(self):
-        # ... (This function remains unchanged) ...
         print("1. Preprocessing: Extracting and preparing contours...")
+        
+        t_start_contour = time.time()
         img_contour = self.find_image_contour(self.original_cv_image)
+        if self.debug_mode.get():
+            elapsed_contour = time.time() - t_start_contour
+            print(f"[DEBUG] T_ContourDetect (Outline): {elapsed_contour:.4f} seconds")
+
         if img_contour is None:
             print("  Error: No contour found in the image.")
             return None
