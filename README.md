@@ -26,7 +26,7 @@ To run this application, you will need Python 3 and the following libraries:
 -   `opencv-python`: For all computer vision tasks.
 -   `ezdxf`: For reading and parsing `.dxf` files.
 -   `numpy`: For numerical operations, especially with coordinates and image data.
--   `scipy`: Used for its `KDTree` implementation for efficient nearest-neighbor searches.
+-   `scipy`: Used for its `KDTree` -   `scipy`: Used for its `KDTree` implementation for efficient nearest-neighbor searches.
 -   `Pillow` (PIL Fork): For handling and displaying images within the Tkinter UI.
 -   `pyueye` (Optional): Required **only** if you intend to use an IDS uEye industrial camera. The application will run without it, but IDS camera features will be disabled.
 
@@ -49,7 +49,7 @@ Navigate to the directory containing the script and run it from your terminal:
 
 ```bash
 python die-vis.py
-
+```
 Basic Usage Workflow
  * Load Input:
    * Click 1a. Load Image to select a static image file of the part.
