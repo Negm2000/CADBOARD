@@ -34,7 +34,7 @@ except ImportError:
 
 class InspectionApp:
     """
-    Main application class for the DIE-VIS Visualizer & Inspector.
+    Main application class for the CADBOARD Visualizer & Inspector.
     This class encapsulates the GUI, state management, and all image processing
     and computer vision logic for comparing a physical part (via image) to a
     CAD drawing (via DXF).
@@ -46,7 +46,7 @@ class InspectionApp:
         :param root: The root Tkinter window.
         """
         self.root = root
-        self.root.title("DIE-VIS: Visualizer & Inspector (Hybrid Geometric Engine)")
+        self.root.title("CADBOARD: Visualizer & Inspector")
         self.root.geometry("1300x950")
 
         # --- State Variables ---

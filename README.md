@@ -33,7 +33,7 @@ To run this application, you will need Python 3 and the following libraries:
 ## Installation
 
 1.  **Clone or download the repository.**
-    Place the `die-vis.py` file in a directory of your choice.
+    Place the `cadboard.py` file in a directory of your choice.
 
 2.  **Install the required Python libraries using pip:**
     ```bash
@@ -48,7 +48,7 @@ To run this application, you will need Python 3 and the following libraries:
 Navigate to the directory containing the script and run it from your terminal:
 
 ```bash
-python die-vis.py
+python cadboard.py
 ```
 Basic Usage Workflow
  * Load Input:
