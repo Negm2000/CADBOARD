@@ -1,37 +1,53 @@
-CADBOARD: Visualizer & Inspector
-CADBOARD is a desktop application developed with Python and Tkinter for visual inspection of physical parts against their CAD designs. It allows a user to load a .dxf file and an image of the corresponding physical object, align them, and perform an automated inspection to find manufacturing defects.
-The application uses computer vision techniques to detect features in the image and compares them against the geometric data extracted from the DXF file. It can identify several types of anomalies:
- * Extra Material: Unexpected material found on the part.
- * Missing Material: Portions of the part's outline that are missing.
- * Hole Occlusion: Holes that are partially or fully blocked.
- * Crease Defects: Deformations or missing creases on the part's surface.
-Key Features
- * Image and DXF Loading: Load part images and DXF design files.
- * Live Camera Capture: Capture images directly from IDS uEye industrial cameras or standard IP/web cameras (e.g., a phone).
- * MOG2 Background Subtraction: Utilizes MOG2 for cleaner object segmentation during live capture.
- * Geometric Alignment: Aligns the DXF drawing with the image using both Affine and Homography transformations.
- * Anomaly Detection: Automatically identifies and highlights discrepancies between the image and the CAD model.
- * Adjustable Tolerances: Fine-tune the sensitivity of the inspection for different types of defects via an intuitive UI.
- * Debug Mode: Visualize intermediate steps of the computer vision pipeline for troubleshooting and analysis.
- * Persistent Settings: Saves your tolerance and configuration settings between sessions.
-Dependencies
-To run this application, you will need Python 3 and the following libraries:
- * opencv-python: For all computer vision tasks.
- * ezdxf: For reading and parsing .dxf files.
- * numpy: For numerical operations, especially with coordinates and image data.
- * scipy: Used for its KDTree implementation for efficient nearest-neighbor searches.
- * Pillow (PIL Fork): For handling and displaying images within the Tkinter UI.
- * pyueye (Optional): Required only if you intend to use an IDS uEye industrial camera. The application will run without it, but IDS camera features will be disabled.
-Installation
- * Clone or download the repository.
-   Place the die-vis.py file in a directory of your choice.
- * Install the required Python libraries using pip:
-   pip install opencv-python ezdxf numpy scipy Pillow
+# CADBOARD: Visualizer & Inspector
 
- * (Optional) Install IDS Camera Library:
-   If you need to connect to an IDS uEye camera, download and install the pyueye library from the official IDS Imaging website. Follow their instructions for installation. If this library is not found, the application will still run but the IDS-specific buttons will be disabled.
-How to Run
+CADBOARD is a desktop application developed with Python and Tkinter for visual inspection of physical parts against their CAD designs. It allows a user to load a `.dxf` file and an image of the corresponding physical object, align them, and perform an automated inspection to find manufacturing defects.
+
+The application uses computer vision techniques to detect features in the image and compares them against the geometric data extracted from the DXF file. It can identify several types of anomalies:
+-   **Extra Material:** Unexpected material found on the part.
+-   **Missing Material:** Portions of the part's outline that are missing.
+-   **Hole Occlusion:** Holes that are partially or fully blocked.
+-   **Crease Defects:** Deformations or missing creases on the part's surface.
+
+## Key Features
+
+-   **Image and DXF Loading:** Load part images and DXF design files.
+-   **Live Camera Capture:** Capture images directly from IDS uEye industrial cameras or standard IP/web cameras (e.g., a phone).
+-   **MOG2 Background Subtraction:** Utilizes MOG2 for cleaner object segmentation during live capture.
+-   **Geometric Alignment:** Aligns the DXF drawing with the image using both Affine and Homography transformations.
+-   **Anomaly Detection:** Automatically identifies and highlights discrepancies between the image and the CAD model.
+-   **Adjustable Tolerances:** Fine-tune the sensitivity of the inspection for different types of defects via an intuitive UI.
+-   **Debug Mode:** Visualize intermediate steps of the computer vision pipeline for troubleshooting and analysis.
+-   **Persistent Settings:** Saves your tolerance and configuration settings between sessions.
+
+## Dependencies
+
+To run this application, you will need Python 3 and the following libraries:
+
+-   `opencv-python`: For all computer vision tasks.
+-   `ezdxf`: For reading and parsing `.dxf` files.
+-   `numpy`: For numerical operations, especially with coordinates and image data.
+-   `scipy`: Used for its `KDTree` implementation for efficient nearest-neighbor searches.
+-   `Pillow` (PIL Fork): For handling and displaying images within the Tkinter UI.
+-   `pyueye` (Optional): Required **only** if you intend to use an IDS uEye industrial camera. The application will run without it, but IDS camera features will be disabled.
+
+## Installation
+
+1.  **Clone or download the repository.**
+    Place the `die-vis.py` file in a directory of your choice.
+
+2.  **Install the required Python libraries using pip:**
+    ```bash
+    pip install opencv-python ezdxf numpy scipy Pillow
+    ```
+
+3.  **(Optional) Install IDS Camera Library:**
+    If you need to connect to an IDS uEye camera, download and install the `pyueye` library from the official IDS Imaging website. Follow their instructions for installation. If this library is not found, the application will still run but the IDS-specific buttons will be disabled.
+
+## How to Run
+
 Navigate to the directory containing the script and run it from your terminal:
+
+```bash
 python die-vis.py
 
 Basic Usage Workflow
@@ -55,4 +71,3 @@ Basic Usage Workflow
      * Yellow: Crease defects.
  * Review Results:
    * Examine the highlighted areas on the image. The application provides a clear visual representation of all detected manufacturing flaws. You can re-run the inspection with different tolerance settings as needed.
-   
