@@ -12,7 +12,7 @@ The application uses computer vision techniques to detect features in the image 
 
 -   **Image and DXF Loading:** Load part images and DXF design files.
 -   **Live Camera Capture:** Capture images directly from IDS uEye industrial cameras or standard IP/web cameras (e.g., a phone).
--   **MOG2 Background Subtraction:** Utilizes MOG2 for cleaner object segmentation during live capture.
+-   **MOG2 Background Subtraction:** You could use the MOG2 option for a more flexible object segmentation.
 -   **Geometric Alignment:** Aligns the DXF drawing with the image using both Affine and Homography transformations.
 -   **Anomaly Detection:** Automatically identifies and highlights discrepancies between the image and the CAD model.
 -   **Adjustable Tolerances:** Fine-tune the sensitivity of the inspection for different types of defects via an intuitive UI.
