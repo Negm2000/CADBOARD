@@ -68,6 +68,6 @@ Basic Usage Workflow
    * Defects will be highlighted directly on the image display:
      * Orange: Extra material.
      * Red: Missing material or hole defects.
-     * Yellow: Crease defects.
+     * Blue: Crease defects.
  * Review Results:
    * Examine the highlighted areas on the image. The application provides a clear visual representation of all detected manufacturing flaws. You can re-run the inspection with different tolerance settings as needed.
