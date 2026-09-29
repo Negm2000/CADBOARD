@@ -1,6 +1,20 @@
-# CADBOARD: Visualizer & Inspector
+# CADBOARD: CAD-vs-camera inspection
 
-CADBOARD is a desktop application developed with Python and Tkinter for visual inspection of physical parts against their CAD designs. It allows a user to load a `.dxf` file and an image of the corresponding physical object, align them, and perform an automated inspection to find manufacturing defects.
+Checks a die-cut cardboard part against its DXF drawing through an industrial camera and flags manufacturing defects. Built by Karim Negm and Oskar Haapalo for *Advanced Measurement Systems for Control Applications* at Politecnico di Milano (2025, supervised by Prof. Marco Tarabini). Full write-up: [docs/CADBOARD_report.pdf](docs/CADBOARD_report.pdf).
+
+| Defect check | Alignment |
+|---|---|
+| ![Defects flagged on a cardboard part](docs/cadboard_defects.png) | ![DXF overlay aligned with iterative homography](docs/cadboard_alignment.png) |
+
+Left: missing material flagged along the cuts, and a crease scored below its fill threshold. Right: the DXF outline, creases and holes aligned onto a skewed phone photo.
+
+## Results
+
+From the evaluation in the report:
+
+- Iterative homography refinement cut the CAD-to-image alignment error (MSE, in pixels) from 15-18 with affine alignment to 3-5, across five lighting setups.
+- On a strongly skewed shot it went from 294.9 to 11.6.
+- The full pipeline takes about 0.26 s per part (alignment about 0.07 s, defect analysis about 0.19 s).
 
 The application uses computer vision techniques to detect features in the image and compares them against the geometric data extracted from the DXF file. It can identify several types of anomalies:
 -   **Extra Material:** Unexpected material found on the part.
