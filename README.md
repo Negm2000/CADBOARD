@@ -2,6 +2,10 @@
 
 Checks a die-cut cardboard part against its DXF drawing through an industrial camera and flags manufacturing defects. Built by Karim Negm and Oskar Haapalo for *Advanced Measurement Systems for Control Applications* at Politecnico di Milano (2025, supervised by Prof. Marco Tarabini). Full write-up: [docs/CADBOARD_report.pdf](docs/CADBOARD_report.pdf).
 
+![Inspection pipeline: phone photo, affine fit, homography refinement, crease check](docs/cadboard_pipeline.gif)
+
+One part through the app, frames taken from the demo recording: the DXF is fitted to a phone photo, refined with homography, then each crease is scored. The two shown in purple fall below the fill threshold.
+
 | Defect check | Alignment |
 |---|---|
 | ![Defects flagged on a cardboard part](docs/cadboard_defects.png) | ![DXF overlay aligned with iterative homography](docs/cadboard_alignment.png) |
